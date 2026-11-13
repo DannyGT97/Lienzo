@@ -1,0 +1,184 @@
+:root {
+  --ui-scale: 1;
+  --row-h: 28px;
+  --icon: 16px;
+  --font: 13px;
+  --touch-min: 32px;
+  --dock-left: 286px;
+  --dock-right: 286px;
+  --bg: #2b2b2e;
+  --panel: #38383c;
+  --line: #4a4a50;
+  --text: #e8e8ea;
+  --accent: #5b9dff;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font: var(--font) system-ui, sans-serif; overscroll-behavior: none; }
+#app { display: grid; height: 100%; grid-template: "bar bar bar" auto "left stage right" minmax(0, 1fr) "left timeline right" auto / calc(var(--dock-left) * var(--ui-scale)) minmax(0, 1fr) calc(var(--dock-right) * var(--ui-scale)); }
+#toolbar { grid-area: bar; display: flex; gap: 8px; align-items: center; padding: 0 12px; background: var(--panel); border-bottom: 1px solid var(--line); }
+#leftdock { grid-area: left; }
+#rightdock { grid-area: right; }
+#timeline { grid-area: timeline; }
+#leftdock, #rightdock { background: var(--panel); padding: 10px; display: flex; flex-direction: column; gap: 10px; overflow: auto; }
+#leftdock { border-right: 1px solid var(--line); }
+#rightdock { border-left: 1px solid var(--line); }
+label { display: flex; flex-direction: column; gap: 4px; }
+label:has(input[type="checkbox"]) { flex-direction: row; align-items: center; gap: 6px; }
+button, select { background: #4a4a50; color: var(--text); border: 1px solid var(--line); border-radius: 4px; padding: 5px 8px; font: inherit; }
+button:hover { background: #56565d; }
+button:disabled, select:disabled, input:disabled { opacity: 0.72; }
+button:focus-visible, select:focus-visible, input:focus-visible, textarea:focus-visible, [tabindex]:focus-visible { outline: 2px solid #8db8ff; outline-offset: 2px; }
+#center { grid-area: stage; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+#stage { flex: 1; min-height: 0; position: relative; overflow: hidden; touch-action: none; background: #1d1d20; }
+/* Sized from the script (main.ts, resizeSurfaces) to match their bitmaps; stretching them to the stage would deform the page while it resizes. */
+#canvas, #overlay { position: absolute; left: 0; top: 0; touch-action: none; }
+#canvas { cursor: crosshair; }
+#overlay { pointer-events: none; }
+.row { display: flex; gap: 4px; }
+#layer-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column-reverse; gap: 2px; }
+#layer-list li { display: flex; align-items: center; gap: 6px; min-height: var(--row-h); padding: 5px 6px; border: 1px solid transparent; border-radius: 4px; background: #424247; cursor: pointer; }
+#layer-list li.active { border-color: var(--accent); }
+#layer-list li span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#layer-list input { margin: 0; }
+
+#tool-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; }
+#tool-grid button.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+#tooloption-body section { display: flex; flex-direction: column; gap: 8px; border-top: 1px solid var(--line); padding-top: 8px; }
+#tooloption-body section[hidden], #tooloption-body label[hidden], #tooloption-body p[hidden], #tooloption-body div[hidden] { display: none !important; }
+#tooloption-body h3 { margin: 0; font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: #aaa; }
+.hint { margin: 0; color: #aaa; font-size: 12px; }
+textarea, input[type="number"] { background: #2b2b2e; color: var(--text); border: 1px solid var(--line); border-radius: 4px; padding: 5px; font: inherit; width: 100%; }
+.row label { flex: 1; }
+#layer-list li small { color: #9aa; font-size: 11px; }
+
+/* ---- touch and small screens ------------------------------------------------ */
+html, body { -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; -webkit-tap-highlight-color: transparent; }
+textarea, input[type="number"] { -webkit-user-select: text; user-select: text; }
+#app { padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
+.only-small { display: none; }
+#toolbar { overflow-x: auto; white-space: nowrap; scrollbar-width: none; }
+#toolbar button, #toolbar strong { flex: none; }
+.touch-opt { font-size: 12px; color: #bbb; }
+
+/* Los perfiles de tableta y móvil se definen al final de studio.css. */
+
+dialog#diag { background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 14px; width: min(640px, calc(94 * var(--vw))); max-height: calc(92 * var(--vh)); overflow: auto; }
+dialog#diag::backdrop { background: rgba(0, 0, 0, 0.6); }
+dialog#diag h3 { margin: 0 0 6px; }
+#diag-out { background: #26262a; padding: 8px; border-radius: 4px; font: 12px/1.4 ui-monospace, Consolas, monospace; white-space: pre-wrap; word-break: break-word; max-height: calc(40 * var(--vh)); overflow: auto; user-select: text; -webkit-user-select: text; }
+#diag-pad { width: 100%; height: 160px; background: #fff; border-radius: 4px; touch-action: none; }
+
+dialog#new-doc { background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 14px; width: min(640px, calc(94 * var(--vw))); max-height: calc(94 * var(--vh)); overflow: auto; display: flex; flex-direction: column; gap: 10px; }
+dialog#new-doc[open] { display: flex; }
+dialog#new-doc::backdrop { background: rgba(0, 0, 0, 0.6); }
+dialog#new-doc h3 { margin: 0; }
+dialog#new-doc .nd-body { display: flex; gap: 14px; align-items: flex-start; }
+dialog#new-doc .nd-form { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 10px; }
+dialog#new-doc .nd-side { width: 180px; flex: none; display: flex; flex-direction: column; gap: 6px; align-items: stretch; }
+dialog#new-doc .nd-form label { display: flex; flex-direction: column; gap: 3px; font-size: 12px; color: #bbb; }
+dialog#new-doc .nd-form label.check { flex-direction: row; align-items: center; gap: 6px; }
+dialog#new-doc .row { align-items: flex-end; flex-wrap: wrap; }
+dialog#new-doc .row .grow { flex: 1 1 90px; min-width: 0; }
+dialog#new-doc .nd-size { flex-wrap: nowrap; }
+dialog#new-doc .nd-dpi { flex: 0 0 72px; }
+dialog#new-doc .nd-dpi input { width: 100%; }
+dialog#new-doc .nd-comic { display: flex; flex-direction: column; gap: 6px; padding: 8px; border: 1px solid var(--line); border-radius: 6px; }
+dialog#new-doc .nd-comic[hidden] { display: none; }
+dialog#new-doc #nd-preview { width: 100%; height: 190px; background: repeating-conic-gradient(#2a2a2e 0 25%, #333338 0 50%) 0 0 / 14px 14px; border-radius: 6px; }
+dialog#new-doc .nd-page { stroke: #666; stroke-width: 1; vector-effect: non-scaling-stroke; }
+dialog#new-doc .nd-page.nd-clear { fill: none; stroke-dasharray: 4 3; }
+dialog#new-doc .nd-guides line { stroke: #4fc3f7; stroke-width: 1; vector-effect: non-scaling-stroke; }
+dialog#new-doc .nd-err { color: #ffb4a8; min-height: 1.3em; }
+@media (max-width: 560px) {
+  dialog#new-doc .nd-body { flex-direction: column; }
+  dialog#new-doc .nd-side { width: 100%; }
+  dialog#new-doc #nd-preview { height: 130px; }
+}
+ :where(html.touch-ui) dialog#new-doc input, :where(html.touch-ui) dialog#new-doc select, :where(html.touch-ui) dialog#new-doc button { min-height: 36px; }
+
+/* Basic canvas properties: Aceptar / Cancelar on top, then the groups Lienzo and Marco. */
+dialog#cp { background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; width: min(460px, calc(94 * var(--vw))); max-height: calc(94 * var(--vh)); overflow: auto; }
+dialog#cp[open] { display: flex; flex-direction: column; gap: 8px; }
+dialog#cp::backdrop { background: rgba(0, 0, 0, 0.6); }
+dialog#cp label { display: flex; flex-direction: column; gap: 3px; font-size: 12px; color: #bbb; }
+dialog#cp label.check { flex-direction: row; align-items: center; gap: 6px; }
+dialog#cp .cp-head { display: flex; align-items: flex-end; gap: 8px; }
+dialog#cp .cp-spacer { flex: 1; }
+dialog#cp .cp-group { margin: 4px 0 0; padding-bottom: 4px; font-size: 12px; font-weight: 600; color: #9a9ca6; border-bottom: 1px solid var(--line); }
+dialog#cp .cp-body { display: flex; gap: 14px; align-items: flex-start; }
+dialog#cp .cp-form { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 8px; }
+dialog#cp .cp-row { display: flex; align-items: flex-end; gap: 8px; }
+dialog#cp .cp-row > label { flex: 1; min-width: 0; }
+dialog#cp .cp-row[hidden] { display: none; }
+dialog#cp #cp-preview { width: 120px; height: 120px; flex: none; background: repeating-conic-gradient(#2a2a2e 0 25%, #333338 0 50%) 0 0 / 14px 14px; border-radius: 6px; }
+dialog#cp .cp-page { stroke: #666; stroke-width: 1; vector-effect: non-scaling-stroke; }
+dialog#cp .cp-page.cp-clear { stroke-dasharray: 4 3; }
+dialog#cp .cp-err { margin: 0; color: #ffb4a8; min-height: 1.3em; font-size: 12px; }
+@media (max-width: 480px) { dialog#cp .cp-body { flex-direction: column; } dialog#cp #cp-preview { width: 100%; height: 100px; } }
+:where(html.touch-ui) dialog#cp input, :where(html.touch-ui) dialog#cp select, :where(html.touch-ui) dialog#cp button { min-height: 36px; }
+dialog#rs { background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; width: min(440px, calc(94 * var(--vw))); max-height: calc(94 * var(--vh)); overflow: auto; }
+dialog#rs::backdrop { background: rgba(0, 0, 0, 0.6); }
+dialog#rs h3 { margin: -12px -14px 6px; padding: 10px 14px; font-size: 14px; }
+dialog#rs .rs-body { display: flex; gap: 14px; align-items: flex-start; }
+dialog#rs .rs-form { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 8px; }
+dialog#rs .rs-grid { display: grid; grid-template-columns: auto 1fr; gap: 6px 10px; align-items: center; font-size: 12px; color: #bbb; }
+dialog#rs .rs-grid input, dialog#rs .rs-grid select { min-width: 0; }
+dialog#rs .rs-check { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #bbb; }
+dialog#rs .rs-buttons { display: flex; flex-direction: column; gap: 6px; flex: none; }
+dialog#rs .rs-err { margin: 0; color: #ffb4a8; min-height: 1.3em; font-size: 12px; }
+@media (max-width: 480px) { dialog#rs .rs-body { flex-direction: column-reverse; } dialog#rs .rs-buttons { flex-direction: row; align-self: stretch; } dialog#rs .rs-buttons button { flex: 1; } }
+:where(html.touch-ui) dialog#rs input, :where(html.touch-ui) dialog#rs select, :where(html.touch-ui) dialog#rs button { min-height: 36px; }
+
+/* The title bar of a movable dialog is its handle: it stays in view while the rest scrolls, and a finger drags it. */
+.dlg-grip { position: sticky; top: -12px; z-index: 1; background: var(--panel); cursor: grab; touch-action: none; user-select: none; -webkit-user-select: none; }
+.dlg-grip:active { cursor: grabbing; }
+
+/* Canvas size: a floating panel (not modal), so the handles on the canvas stay usable. */
+dialog#cs-resize { position: fixed; inset: 0; margin: auto; height: fit-content; max-height: calc(94 * var(--vh)); overflow: auto; width: min(240px, calc(94 * var(--vw))); background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 12px; z-index: 30; }
+dialog#cs-resize[open] { display: flex; flex-direction: column; gap: 8px; }
+dialog#cs-resize > * { flex-shrink: 0; }
+dialog#cs-resize h3 { margin: -12px -12px 0; padding: 10px 12px; font-size: 14px; }
+dialog#cs-resize label { display: flex; flex-direction: row; align-items: center; justify-content: space-between; gap: 8px; font-size: 12px; color: #bbb; }
+dialog#cs-resize label input, dialog#cs-resize label select { width: 110px; }
+dialog#cs-resize .cs-anchor { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 12px; color: #bbb; }
+dialog#cs-resize .cs-grid { display: grid; grid-template-columns: repeat(3, 22px); gap: 3px; }
+dialog#cs-resize .cs-grid button { width: 22px; height: 22px; padding: 0; border: 1px solid var(--line); border-radius: 3px; background: #2a2a2e; cursor: pointer; }
+dialog#cs-resize .cs-grid button.on { background: #2f7bff; border-color: #2f7bff; }
+dialog#cs-resize .cs-err { margin: 0; min-height: 1.2em; font-size: 12px; color: #ffb4a8; }
+dialog#cs-resize .cs-buttons { display: flex; gap: 6px; justify-content: flex-end; }
+:where(html.touch-ui) dialog#cs-resize input, :where(html.touch-ui) dialog#cs-resize select, :where(html.touch-ui) dialog#cs-resize .cs-buttons button { min-height: 36px; }
+:where(html.touch-ui) dialog#cs-resize .cs-grid { grid-template-columns: repeat(3, 34px); }
+:where(html.touch-ui) dialog#cs-resize .cs-grid button { width: 34px; height: 34px; }
+
+
+/* Label above, the whole value field below: in a narrow panel the slider keeps a usable length. */
+.vf-row { display: flex; flex-direction: column; align-items: stretch; gap: 3px; font-size: 12px; }
+
+#perf { position: absolute; top: 8px; right: 8px; z-index: 5; background: rgba(20, 20, 24, 0.9); border: 1px solid var(--line); border-radius: 8px; padding: 8px; max-width: min(520px, calc(100% - 16px)); }
+#perf[hidden] { display: none; }
+#perf pre { margin: 6px 0 0; font: 12px/1.45 ui-monospace, Consolas, monospace; white-space: pre-wrap; word-break: break-word; color: #d8d8dc; user-select: text; -webkit-user-select: text; }
+#perf button { padding: 3px 8px; min-height: 0; }
+#toolbar button.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+dialog.app-dialog { background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 16px; width: min(440px, calc(92 * var(--vw))); }
+dialog.app-dialog[open] { display: flex; flex-direction: column; gap: 12px; }
+dialog.app-dialog::backdrop { background: rgba(0, 0, 0, 0.6); }
+dialog.app-dialog h3 { margin: 0; }
+dialog.app-dialog .msg { margin: 0; white-space: pre-wrap; line-height: 1.4; }
+dialog.app-dialog input { background: #2b2b2e; color: var(--text); border: 1px solid var(--line); border-radius: 4px; padding: 8px; font: inherit; }
+dialog.app-dialog .row { justify-content: flex-end; }
+/* Many choices at once (the file type list): a grid of equal buttons instead of one long row. */
+dialog.app-dialog .row.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+#drop-hint { position: fixed; inset: 0; z-index: 50; display: flex; align-items: center; justify-content: center; background: rgba(20, 20, 24, 0.72); border: 3px dashed var(--accent); color: var(--text); font-size: max(14px, calc(1.4em * var(--ui-scale, 1))); text-align: center; padding: calc(24px * var(--ui-scale, 1)); pointer-events: none; }
+#drop-hint[hidden] { display: none; }
+
+/* No document open: no canvas, a welcome panel, and the panels that act on a document are dimmed and inert. */
+#empty-state { position: absolute; inset: 0; z-index: 5; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; background: var(--bg, #1c1c20); color: var(--text); }
+#empty-state[hidden] { display: none; }
+#empty-state p { margin: 0; opacity: 0.8; }
+#empty-state .row { display: flex; gap: 10px; }
+html.workspace-empty #canvas, html.workspace-empty #overlay { display: none; }
+html.workspace-empty #leftdock, html.workspace-empty #rightdock, html.workspace-empty #commandbar { opacity: 0.4; pointer-events: none; }

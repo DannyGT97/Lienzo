@@ -1,0 +1,35 @@
+[package]
+name = "lienzo"
+version = "0.1.0"
+description = "Editor de dibujo y manga"
+authors = ["DannyGT97"]
+license = ""
+repository = ""
+edition = "2024"
+rust-version = "1.90"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+name = "app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.7.4", features = [] }
+
+[dependencies]
+serde_json = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+log = "0.4"
+base64 = "0.22"
+tauri = { version = "2.12.5", features = [] }
+tauri-plugin-log = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-fs = "2"
+semver = "1.0.28"
+minisign-verify = "0.3.0"
+# Certificates are bundled (webpki-roots): the platform verifier of reqwest 0.13 needs Java glue on Android.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots"] }
+
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+tauri-plugin-updater = "2"

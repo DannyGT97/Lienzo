@@ -1,0 +1,397 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+    <title>Lienzo</title>
+    <link rel="stylesheet" href="/src/app/style.css" />
+    <link rel="stylesheet" href="/src/ui/studio.css" />
+    <link rel="stylesheet" href="/src/app/notify.css" />
+  </head>
+  <body>
+    <div id="app">
+      <header id="appbar">
+        <div id="titlebar">
+          <strong class="brand">Lienzo</strong>
+          <span id="doc-title" class="doc-title"></span>
+        </div>
+        <div id="menurow">
+          <button id="toggle-tools" class="only-small" title="Herramientas">Herramientas</button>
+          <nav id="menubar" aria-label="Menú principal"></nav>
+          <button id="toggle-layers" class="only-small" title="Capas">Capas</button>
+        </div>
+        <input id="psd-input" type="file" accept=".lienzo,.psd,.psb,.ora,.clip,image/*,.jfif,.avif,.jxl,.ico,.tga,.tif,.tiff,.pnm,.pbm,.pgm,.ppm,.pam,.qoi,.pcx,.svg" hidden />
+      </header>
+
+      <aside id="leftdock">
+        <nav id="toolcol" aria-label="Herramientas">
+          <div class="dock-fold-row">
+            <button id="fold-toolcol" class="dock-fold" type="button" title="Ocultar las herramientas" aria-label="Ocultar las herramientas"></button>
+            <button id="fold-subdock" class="dock-fold" type="button" title="Ocultar subherramientas y propiedades" aria-label="Ocultar subherramientas y propiedades" aria-pressed="false"></button>
+          </div>
+          <div id="toolcol-tools"></div>
+          <div id="toolcol-colors">
+            <button id="color-main" class="swatch main on" type="button" aria-pressed="true" title="Color principal (doble clic para cambiarlo)"></button>
+            <button id="color-sub" class="swatch sub" type="button" aria-pressed="false" title="Color secundario (doble clic para cambiarlo, X para intercambiar)"></button>
+            <button id="color-clear" class="swatch clear" type="button" aria-pressed="false" title="Color transparente: pintar y rellenar borra"></button>
+            <button id="color-swap" class="swatch-swap" title="Intercambiar colores (X)" data-icon="swap"></button>
+          </div>
+          <div id="toolcol-sliders" aria-label="Deslizadores de la herramienta">
+            <div class="tc-bubbles">
+              <button type="button" class="bubble" id="bubble-size" title="Tamaño del pincel" aria-label="Tamaño del pincel"><b>12.0</b><small>px</small></button>
+              <button type="button" class="bubble" id="bubble-opacity" title="Opacidad" aria-label="Opacidad"><b>100</b><small>%</small></button>
+            </div>
+          </div>
+        </nav>
+        <div id="subdock">
+          <section class="palette" id="pal-subtool">
+            <header class="palette-head"><span>Subherramienta</span><button class="ph-btn" id="subtool-detail-btn" title="Detalle de subherramienta" aria-pressed="false" data-icon="settings"></button></header>
+            <div class="palette-body">
+              <div id="subtool-groups" class="st-groups"></div>
+              <ul id="subtool-list" class="st-list"></ul>
+            </div>
+          </section>
+          <section class="palette" id="pal-tooloption">
+            <header class="palette-head"><span>Propiedades de herramienta</span></header>
+            <div class="palette-body" id="tooloption-body">
+              <label class="touch-opt"><input id="finger-draws" type="checkbox" checked /> Dibujar con el dedo</label>
+              <button id="subtool-reset" type="button" hidden title="Devuelve esta subherramienta a sus valores de fábrica">Valores de fábrica</button>
+        <section id="sec-brush">
+          <div class="vf-row" title="Atajos: [ más fino, ] más grueso"><span class="vf-row-label">Tamaño</span><span id="size-field"></span></div>
+          <label>Dureza <span id="hardness-v"></span><input id="hardness" type="range" min="0" max="100" value="80" /></label>
+          <label>Opacidad <span id="opacity-v"></span><input id="opacity" type="range" min="0.1" max="100" step="0.1" value="100" /></label>
+          <label>Estabilización <span id="stab-v"></span><input id="stab" type="range" min="0" max="95" value="30" /></label>
+          <label><input id="psize" type="checkbox" checked /> Presión → tamaño</label>
+          <label>Presión → opacidad <span id="popacity-v"></span><input id="popacity" type="range" min="0" max="100" value="0" /></label>
+          <label>Presión → flujo <span id="pflow-v"></span><input id="pflow" type="range" min="0" max="100" value="0" /></label>
+          <label>Curva de presión <span id="pcurve-v"></span><input id="pcurve" type="range" min="40" max="250" value="100" /></label>
+          <label>Tamaño mínimo <span id="minsize-v"></span><input id="minsize" type="range" min="0" max="100" value="0" /></label>
+          <label>Grosor de la punta <span id="nibthick-v"></span><input id="nibthick" type="range" min="10" max="200" value="100" /></label>
+          <label>Ángulo de la punta <span id="nibangle-v"></span><input id="nibangle" type="range" min="0" max="179" value="0" /></label>
+          <label>Flujo por sello <span id="flow-v"></span><input id="flow" type="range" min="5" max="100" value="100" /></label>
+          <label>Entrada (afinado) <span id="taperin-v"></span><input id="taperin" type="range" min="0" max="400" value="0" /></label>
+          <label>Salida (afinado) <span id="taperout-v"></span><input id="taperout" type="range" min="0" max="400" value="0" /></label>
+          <label>Textura de papel <span id="grain-v"></span><input id="grain" type="range" min="0" max="100" value="0" /></label>
+          <label>Tamaño del grano <span id="grainscale-v"></span><input id="grainscale" type="range" min="1" max="40" value="6" /></label>
+          <label><input id="predict" type="checkbox" checked /> Predicción del trazo</label>
+          <label title="Con zoom la línea sigue más de cerca al lápiz y alejado se suaviza más. Desactivada (por defecto), el retardo en pantalla es el mismo a cualquier zoom"><input id="stabzoom" type="checkbox" /> Estabilización según el zoom</label>
+          <label title="La estabilización marcada es el máximo (mano lenta); al trazar rápido se reduce para que la línea siga al lápiz. Algoritmo propio, no el de Clip Studio"><input id="stabspeed" type="checkbox" /> Estabilización según la velocidad</label>
+          <label title="Suavizado del borde: Ninguno deja el borde duro, Fuerte lo difumina más">Antialiasing
+            <select id="antialias">
+              <option value="0">Ninguno</option>
+              <option value="1">Débil</option>
+              <option value="2" selected>Medio</option>
+              <option value="3">Fuerte</option>
+            </select>
+          </label>
+          <div class="planned-group" title="Estas opciones se activarán cuando se implemente el pincel avanzado">
+            <h4>Próximamente</h4>
+            <label>Modo de mezcla <select disabled><option>Normal</option></select></label>
+            <label><input type="checkbox" disabled /> Usar borde de acuarela</label>
+          </div>
+        </section>
+
+        <section id="sec-select" hidden>
+          <h3 id="sel-title">Selección</h3>
+          <label id="sel-mode-row">Modo
+            <select id="sel-mode">
+              <option value="replace">Nueva selección</option>
+              <option value="add">Añadir (Mayús)</option>
+              <option value="subtract">Restar (Alt)</option>
+              <option value="intersect">Intersecar</option>
+            </select>
+          </label>
+          <div id="sel-wand">
+            <label>Tolerancia <span id="sel-tol-v"></span><input id="sel-tol" type="range" min="0" max="255" value="32" /></label>
+            <label id="sel-contig-row"><input id="sel-contig" type="checkbox" checked /> Solo píxeles contiguos</label>
+            <label id="sel-gap-row">Cerrar huecos <span id="sel-gap-v"></span><input id="sel-gap" type="range" min="0" max="20" value="0" /></label>
+            <label><input id="sel-all" type="checkbox" checked /> Mirar todas las capas</label>
+            <label id="sel-grow-row">Expandir relleno <span id="sel-grow-v"></span><input id="sel-grow" type="range" min="0" max="10" value="1" /></label>
+            <label id="sel-aa-row" title="Suaviza el borde de la zona rellenada (antialiasing)"><input id="sel-aa" type="checkbox" checked /> Suavizar bordes del relleno</label>
+          </div>
+          <p class="hint">Mayús añade y Alt resta al arrastrar. Supr borra lo seleccionado, Mayús+Supr lo rellena con el color principal.</p>
+        </section>
+
+        <section id="sec-shape" hidden>
+          <h3 id="shape-title">Figura</h3>
+          <label id="grad-shape-row">Forma del degradado
+            <select id="grad-shape">
+              <option value="auto">Automática (la del degradado)</option>
+              <option value="linear">Lineal</option>
+              <option value="radial">Radial</option>
+              <option value="mirrored">Reflejado</option>
+              <option value="conic">Cónico</option>
+            </select>
+          </label>
+          <label id="grad-repeat-row">Fuera de los extremos
+            <select id="grad-repeat">
+              <option value="clamp">Mantener el color</option>
+              <option value="repeat">Repetir</option>
+              <option value="mirror">Reflejar</option>
+              <option value="none">Nada</option>
+            </select>
+          </label>
+          <label id="grad-dither-row"><input id="grad-dither" type="checkbox" /> Tramado (evita las bandas)</label>
+          <label id="grad-manga-row"><input id="grad-manga" type="checkbox" /> Degradado manga (puntos de trama)</label>
+          <div id="grad-manga-opts" hidden>
+            <label>Forma de la trama
+              <select id="grad-manga-shape">
+                <option value="dot">Puntos</option>
+                <option value="line">Líneas</option>
+                <option value="cross">Cuadrícula</option>
+              </select>
+            </label>
+            <label>Líneas por pulgada <span id="grad-manga-lpi-v">60</span><input id="grad-manga-lpi" type="range" min="10" max="150" value="60" /></label>
+            <label>Ángulo <span id="grad-manga-angle-v">45</span>°<input id="grad-manga-angle" type="range" min="0" max="179" value="45" /></label>
+          </div>
+          <label id="pick-size-row">Muestra del cuentagotas
+            <select id="pick-size">
+              <option value="0">1 píxel</option>
+              <option value="1">3 × 3</option>
+              <option value="2">5 × 5</option>
+              <option value="4">9 × 9</option>
+            </select>
+          </label>
+          <label id="fig-fill-row"><input id="fig-fill" type="checkbox" /> Rellenar con el color secundario</label>
+          <p id="fig-size-row" class="hint">El grosor de la línea es el tamaño del pincel.</p>
+          <p class="hint">Arrastra para dibujar. En polilíneas y polígonos, toca cada punto; doble toque o el botón Cerrar termina.</p>
+        </section>
+
+        <section id="sec-liquify" hidden>
+          <h3>Licuar</h3>
+          <label>Modo
+            <select id="liq-mode">
+              <option value="push">Empujar</option>
+              <option value="bloat">Hinchar</option>
+              <option value="pinch">Contraer</option>
+              <option value="twirl">Girar a la derecha</option>
+              <option value="untwirl">Girar a la izquierda</option>
+              <option value="restore">Restaurar</option>
+            </select>
+          </label>
+          <p class="hint">Arrastra sobre la capa para deformarla. El tamaño y la opacidad del pincel son el radio y la fuerza; «Restaurar» devuelve la imagen original del trazo. Respeta la selección y el bloqueo de transparencia.</p>
+        </section>
+
+        <section id="sec-vector" hidden>
+          <h3>Línea vectorial</h3>
+          <label id="vec-strength-row">Corrección al soltar <span id="vec-strength-v">40</span>
+            <input id="vec-strength" type="range" min="0" max="100" value="40" />
+          </label>
+          <label id="vec-reach-row">Alcance <span id="vec-reach-v">40</span> px
+            <input id="vec-reach" type="range" min="10" max="200" value="40" />
+          </label>
+          <label id="vec-thick-row">Grosor
+            <select id="vec-thick">
+              <option value="up">Más grueso</option>
+              <option value="down">Más fino</option>
+            </select>
+          </label>
+          <p id="vec-hint" class="hint"></p>
+        </section>
+
+        <section id="sec-ruler" hidden>
+          <h3>Regla</h3>
+          <label id="ruler-persp-row">Puntos de fuga
+            <select id="ruler-persp">
+              <option value="1">1 punto</option>
+              <option value="2">2 puntos (con vertical)</option>
+              <option value="3">3 puntos</option>
+            </select>
+          </label>
+          <label id="ruler-fig-row">Figura
+            <select id="ruler-fig">
+              <option value="ellipse">Elipse</option>
+              <option value="rect">Rectángulo</option>
+            </select>
+          </label>
+          <label id="ruler-special-row">Guías
+            <select id="ruler-special">
+              <option value="parallel">Líneas paralelas</option>
+              <option value="radial">Líneas radiales</option>
+              <option value="concentric">Círculos concéntricos</option>
+            </select>
+          </label>
+          <label id="ruler-count-row">Cantidad <input id="ruler-count" type="number" min="1" max="360" step="1" value="10" /></label>
+          <label id="ruler-gap-row">Separación (px) <input id="ruler-gap" type="number" min="2" max="2000" step="1" value="60" /></label>
+          <p id="ruler-hint" class="hint"></p>
+        </section>
+
+        <section id="sec-tone" hidden>
+          <h3>Tono (trama)</h3>
+          <p class="hint">Pinta el área; la trama se recorta a lo pintado.</p>
+          <label>Forma
+            <select id="tn-shape">
+              <option value="dot">Puntos</option>
+              <option value="line">Líneas</option>
+              <option value="cross">Cuadrícula</option>
+            </select>
+          </label>
+          <label>Densidad <span id="tn-density-v"></span><input id="tn-density" type="range" min="0" max="100" value="50" /></label>
+          <label>Líneas por pulgada <span id="tn-lpi-v"></span><input id="tn-lpi" type="range" min="10" max="150" value="60" /></label>
+          <label>Ángulo <span id="tn-angle-v"></span><input id="tn-angle" type="range" min="0" max="179" value="45" /></label>
+          <label>Color <input id="tn-color" type="color" value="#000000" /></label>
+        </section>
+
+        <section id="sec-panel" hidden>
+          <h3>Viñetas</h3>
+          <label>Grosor de borde <span id="pn-border-v"></span><input id="pn-border" type="range" min="1" max="80" value="5" /></label>
+          <label>Separación <span id="pn-gutter-v"></span><input id="pn-gutter" type="range" min="0" max="400" value="24" /></label>
+          <div class="row">
+            <label>Filas <input id="pn-rows" type="number" min="1" max="10" value="3" /></label>
+            <label>Columnas <input id="pn-cols" type="number" min="1" max="10" value="2" /></label>
+          </div>
+          <label>Margen <span id="pn-margin-v"></span><input id="pn-margin" type="range" min="0" max="800" value="60" /></label>
+          <button id="pn-grid">Crear cuadrícula</button>
+        </section>
+
+        <section id="sec-balloon" hidden>
+          <h3>Globo / texto</h3>
+          <label>Forma
+            <select id="bp-shape">
+              <option value="ellipse">Elipse</option>
+              <option value="rounded">Redondeado</option>
+              <option value="rough">Redondeado áspero</option>
+              <option value="curve">Curvo</option>
+              <option value="rect">Rectángulo</option>
+              <option value="shout">Grito</option>
+              <option value="cloud">Nube (pensamiento)</option>
+              <option value="none">Sin globo</option>
+            </select>
+          </label>
+          <label>Texto <textarea id="bp-text" rows="4" placeholder="Escribe aquí…"></textarea></label>
+          <label>Fuente
+            <select id="bp-font">
+              <option value="sans-serif">Sans</option>
+              <option value="serif">Serif</option>
+              <option value="'Comic Sans MS','Comic Neue',cursive">Cómic</option>
+              <option value="cursive">Manuscrita</option>
+              <option value="monospace">Monoespaciada</option>
+              <option value="'Yu Gothic','Meiryo','Noto Sans JP',sans-serif">Japonés</option>
+            </select>
+          </label>
+          <label>Tamaño <span id="bp-size-v"></span><input id="bp-size" type="range" min="8" max="500" value="28" /></label>
+          <label>Borde <span id="bp-border-v"></span><input id="bp-border" type="range" min="0" max="50" value="4" /></label>
+          <label><input id="bp-vertical" type="checkbox" /> Texto vertical</label>
+          <label><input id="bp-tail" type="checkbox" /> Con cola</label>
+          <label>Tipo de cola
+            <select id="bp-tail-style">
+              <option value="speech">Pico</option>
+              <option value="thought">Pensamiento</option>
+            </select>
+          </label>
+        </section>
+            </div>
+          </section>
+          <div id="dock-left-extra"></div>
+        </div>
+      </aside>
+
+      <section id="center">
+        <div id="commandbar" role="toolbar" aria-label="Barra de comandos"></div>
+        <div id="doctabs"></div>
+        <main id="stage">
+          <button id="show-toolcol" class="dock-reopen" type="button" title="Mostrar las herramientas" aria-label="Mostrar las herramientas"></button>
+          <canvas id="canvas"></canvas>
+          <canvas id="overlay"></canvas>
+          <div id="empty-state" hidden>
+            <p>No hay ningún documento abierto.</p>
+            <div class="row"><button id="empty-new" class="primary" type="button">Nuevo…</button><button id="empty-open" type="button">Abrir…</button></div>
+          </div>
+          <div id="path-bar" hidden>
+            <span>Selección</span>
+            <button id="path-close" class="primary">Cerrar</button>
+            <button id="path-cancel">Cancelar</button>
+          </div>
+          <div id="transform-bar" hidden>
+          <span id="transform-hint"></span>
+          <span>Transformar</span>
+          <button data-tmode="free" class="tmode">Escala</button>
+          <button data-tmode="distort" class="tmode">Distorsión</button>
+          <button data-tmode="perspective" class="tmode">Perspectiva</button>
+          <button data-tmode="skew" class="tmode">Inclinar</button>
+          <button data-tmode="mesh" class="tmode">Malla</button>
+          <button id="transform-lock" class="tmode on" aria-pressed="true" title="Escalar desde una esquina sin deformar. Desbloquéalo (o mantén Mayús) para escalar libremente.">Proporción</button>
+          <button id="transform-apply" class="primary">Aplicar</button>
+          <button id="transform-cancel">Cancelar</button>
+        </div>
+          <div id="perf" hidden>
+            <div class="row"><button id="perf-copy">Copiar</button><button id="perf-reset">Reiniciar</button><button id="perf-close">Cerrar</button></div>
+            <pre id="perf-text">Dibuja un trazo…</pre>
+          </div>
+        </main>
+        <footer id="statusbar"></footer>
+      </section>
+
+      <section id="timeline" hidden></section>
+
+      <aside id="rightdock">
+        <button id="fold-rightdock" class="dock-fold dock-fold-right" type="button" aria-pressed="false"></button>
+        <div id="rightdock-body">
+          <div id="dock-right"></div>
+          <nav id="palette-strip" aria-label="Paletas"></nav>
+        </div>
+      </aside>
+
+      <!-- Palettes whose markup is static: the dock adopts these elements when it shows them. -->
+      <div id="static-palettes" hidden>
+        <div id="pal-layer" class="layer-palette">
+          <div id="layer-props">
+            <div class="lp-top">
+              <select id="lcolor" class="lp-color" disabled title="Etiqueta de color (todavía no disponible)"><option>▢</option></select>
+              <select id="blend" title="Modo de mezcla"></select>
+              <label class="lp-opacity" title="Opacidad de la capa">
+                <input id="lopacity" type="range" min="0" max="100" value="100" />
+                <span id="lopacity-v"></span>
+              </label>
+            </div>
+            <div class="lp-icons">
+              <label class="tbtn" title="Ajustar a capa inferior"><input id="clip" type="checkbox" /><span data-icon="clip"></span></label>
+              <label class="tbtn" title="Bloquear transparencia"><input id="lock-alpha" type="checkbox" /><span data-icon="lock-alpha"></span></label>
+              <button id="lock-layer" class="tbtn" title="Bloquear capa" data-icon="lock"></button>
+              <button id="role-draft" class="tbtn" title="Capa de borrador: se ve al trabajar pero no sale en la exportación" data-icon="draft"></button>
+              <button id="role-ref" class="tbtn" title="Capa de referencia: la miran el relleno y la selección automática, y no sale en la exportación" data-icon="reference"></button>
+              <button id="mask-btn" class="tbtn" title="Crear máscara de capa" data-icon="mask"></button>
+            </div>
+            <div class="lp-icons layer-cmds">
+              <button id="add-layer" class="tbtn" title="Nueva capa de trama" data-icon="layer-new"></button>
+              <button class="tbtn" disabled title="Nueva capa vectorial (todavía no disponible)" data-icon="layer-vector"></button>
+              <button id="add-folder" class="tbtn" title="Nueva carpeta" data-icon="folder-new"></button>
+              <button id="dup-layer" class="tbtn" title="Duplicar capa" data-icon="copy"></button>
+              <button id="merge-layer" class="tbtn" title="Combinar con la capa inferior (Ctrl+E)" data-icon="merge"></button>
+              <button id="up-layer" class="tbtn" title="Subir capa" data-icon="up"></button>
+              <button id="down-layer" class="tbtn" title="Bajar capa" data-icon="down"></button>
+              <button id="ren-layer" class="tbtn" title="Cambiar el nombre de la capa" data-icon="rename"></button>
+              <button id="del-layer" class="tbtn" title="Borrar capa" data-icon="clear"></button>
+            </div>
+          </div>
+          <ul id="layer-list"></ul>
+        </div>
+        <div id="pal-layerprop" class="layerprop-palette">
+          <p class="ph-note">Efectos y color de la capa activa.</p>
+          <div class="nav-row ph-buttons">
+            <button class="nav-btn" disabled title="Efecto de borde (todavía no disponible)" data-icon="frame"></button>
+            <button class="nav-btn" disabled title="Regla (todavía no disponible)" data-icon="ruler"></button>
+            <button class="nav-btn" disabled title="Tono (todavía no disponible)" data-icon="tone"></button>
+            <button class="nav-btn" disabled title="Color de capa (todavía no disponible)" data-icon="color"></button>
+          </div>
+          <label>Color de expresión <select disabled><option>Color</option><option>Gris</option><option>Monocromo</option></select></label>
+          <label><input type="checkbox" disabled /> Usar color de capa</label>
+          <label><input type="checkbox" disabled /> Efecto de borde</label>
+          <label><input type="checkbox" disabled /> Capa de borrador</label>
+          <label><input type="checkbox" disabled /> Capa de referencia</label>
+        </div>
+      </div>
+    </div>
+    <div id="tc-pop" role="dialog" aria-label="Tamaño y opacidad rápidos" hidden>
+      <input id="tcp-slider" class="vslider" type="range" min="0" max="1000" value="0" />
+      <div class="tcp-arrows">
+        <button type="button" data-step="1" title="Sube 1" aria-label="Subir 1"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 11l6-6 6 6M6 18l6-6 6 6"/></svg></button>
+        <button type="button" data-step="0.1" title="Sube 0,1" aria-label="Subir 0,1"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 15l6-6 6 6"/></svg></button>
+        <button type="button" data-step="-0.1" title="Baja 0,1" aria-label="Bajar 0,1"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button>
+        <button type="button" data-step="-1" title="Baja 1" aria-label="Bajar 1"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l6 6 6-6M6 13l6 6 6-6"/></svg></button>
+      </div>
+      <button type="button" id="tcp-swap" class="tcp-swap" title="Cambiar entre tamaño y opacidad" aria-label="Cambiar entre tamaño y opacidad" data-icon="swap"></button>
+    </div>
+    <script type="module" src="/src/app/main.ts"></script>
+  </body>
+</html>
