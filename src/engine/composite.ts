@@ -5,6 +5,8 @@ import { layerTree, type TreeNode } from './layer-tree';
 import { TILE, tileRange, type Rect } from './tiles';
 
 const T2 = TILE * TILE;
+/** Whether a 32-bit view of RGBA pixels has the alpha in its top byte (little-endian machines: every browser we run on). */
+const LITTLE = new Uint8Array(new Uint32Array([1]).buffer)[0] === 1;
 
 /**
  * Composite `src` over `dst` for one pixel (straight alpha, 0..1 floats). Writes [r,g,b,a] into `out`.
@@ -246,6 +248,9 @@ function planTile(nodes: readonly TreeNode[], tx: number, ty: number, cur: { li:
       if (tile) {
         any = varies = true;
         srcs.push(tile);
+      } else if (!layer.clip && !nodes[nodes.indexOf(tn) + 1]?.layer.clip) {
+        // A layer with nothing on this tile and no layer clipped to it adds nothing at any pixel here: it is left out of the plan.
+        continue;
       }
       plan.push({
         layer,
@@ -317,19 +322,61 @@ export function flattenRegion(doc: Document, region: Rect, opts: CompositeOption
       // The result at a pixel depends only on the pixels the planned tiles hold there, so a run of equal pixels
       // (flat colour, which is most of a drawing) is composed once. Tiles that are not 4-byte aligned skip this.
       const views = srcs.map((s) => ((s.byteOffset & 3) === 0 ? new Uint32Array(s.buffer, s.byteOffset, T2) : null));
-      const memo = views.every((v) => v !== null);
+      const memo = LITTLE && views.every((v) => v !== null);
       const key = new Uint32Array(views.length);
+      // Per row, the views that have any alpha in it: a view with none there contributes nothing whatever its colour, so a row where
+      // no view has any is one value and the others are compared on the views that matter only.
+      const live = new Int32Array(views.length);
       let have = false;
       let r0 = 0;
       let r1 = 0;
       let r2 = 0;
       let r3 = 0;
+      const evalHere = (at: number): void => {
+        cur.li = at * 4;
+        acc[0] = acc[1] = acc[2] = acc[3] = 0;
+        evalNodes(plan, acc, st, 0);
+        r0 = acc[0]! * 255;
+        r1 = acc[1]! * 255;
+        r2 = acc[2]! * 255;
+        r3 = acc[3]! * 255;
+      };
       for (let y = ya; y < yb; y++) {
+        const rowAt = (y - ty * TILE) * TILE;
+        let n = 0;
+        if (memo) {
+          const x0 = xa - tx * TILE;
+          const x1 = xb - tx * TILE;
+          for (let k = 0; k < views.length; k++) {
+            const v = views[k]!;
+            let any = false;
+            for (let i = rowAt + x0; i < rowAt + x1; i++) {
+              if (v[i]! >>> 24 !== 0) {
+                any = true;
+                break;
+              }
+            }
+            if (any) live[n++] = k;
+          }
+        }
+        if (memo && n === 0) {
+          // Nothing from any layer on this row: it composes to the same value everywhere (worked out at its first pixel).
+          evalHere(rowAt + (xa - tx * TILE));
+          for (let o = ((y - y0) * rw + (xa - x0)) * 4, end = o + (xb - xa) * 4; o < end; o += 4) {
+            out[o] = r0;
+            out[o + 1] = r1;
+            out[o + 2] = r2;
+            out[o + 3] = r3;
+          }
+          have = false;
+          continue;
+        }
         for (let x = xa; x < xb; x++) {
-          const at = (y - ty * TILE) * TILE + (x - tx * TILE);
+          const at = rowAt + (x - tx * TILE);
           if (memo) {
             let same = have;
-            for (let k = 0; k < views.length; k++) {
+            for (let j = 0; j < n; j++) {
+              const k = live[j]!;
               const v = views[k]![at]!;
               if (v !== key[k]) {
                 key[k] = v;
@@ -337,23 +384,11 @@ export function flattenRegion(doc: Document, region: Rect, opts: CompositeOption
               }
             }
             if (!same) {
-              cur.li = at * 4;
-              acc[0] = acc[1] = acc[2] = acc[3] = 0;
-              evalNodes(plan, acc, st, 0);
-              r0 = acc[0]! * 255;
-              r1 = acc[1]! * 255;
-              r2 = acc[2]! * 255;
-              r3 = acc[3]! * 255;
+              evalHere(at);
               have = true;
             }
           } else {
-            cur.li = at * 4;
-            acc[0] = acc[1] = acc[2] = acc[3] = 0;
-            evalNodes(plan, acc, st, 0);
-            r0 = acc[0]! * 255;
-            r1 = acc[1]! * 255;
-            r2 = acc[2]! * 255;
-            r3 = acc[3]! * 255;
+            evalHere(at);
           }
           const o = ((y - y0) * rw + (x - x0)) * 4;
           out[o] = r0;
@@ -361,6 +396,7 @@ export function flattenRegion(doc: Document, region: Rect, opts: CompositeOption
           out[o + 2] = r2;
           out[o + 3] = r3;
         }
+        have = false; // the live views change from row to row: the keys are not comparable across rows
       }
     }
   }
@@ -405,24 +441,49 @@ export function sampleDocument(doc: Document, x: number, y: number, opts: Compos
   return [acc[0]! * 255, acc[1]! * 255, acc[2]! * 255, acc[3]! * 255];
 }
 
-/** Average colour and coverage of a layer over each cell of a w×h grid (every painted pixel counts). */
-function downsampleLayer(layer: Layer, docW: number, docH: number, w: number, h: number): { r: Float32Array; g: Float32Array; b: Float32Array; a: Float32Array } {
+type Reduced = { r: Float32Array; g: Float32Array; b: Float32Array; a: Float32Array };
+
+/** The reduced pictures made so far, per surface and size, with the revision of the surface they were made from. */
+const reducedCache = new WeakMap<object, { revision: number; docW: number; docH: number; bySize: Map<string, Reduced> }>();
+
+/**
+ * Average colour and coverage of a layer over each cell of a w×h grid (every painted pixel counts). The result is kept while the
+ * layer's pixels do not change: the layer thumbnails and the navigator ask for it after every edit, for every layer.
+ */
+function downsampleLayer(layer: Layer, docW: number, docH: number, w: number, h: number): Reduced {
+  const surface = layer.surface;
+  let entry = reducedCache.get(surface);
+  if (!entry || entry.revision !== surface.revision || entry.docW !== docW || entry.docH !== docH) {
+    entry = { revision: surface.revision, docW, docH, bySize: new Map() };
+    reducedCache.set(surface, entry);
+  }
+  const key = `${w}x${h}`;
+  let r = entry.bySize.get(key);
+  if (!r) {
+    r = computeReduced(layer, docW, docH, w, h);
+    entry.bySize.set(key, r);
+  }
+  return r;
+}
+
+function computeReduced(layer: Layer, docW: number, docH: number, w: number, h: number): Reduced {
   const n = w * h;
   const sum = { r: new Float32Array(n), g: new Float32Array(n), b: new Float32Array(n), a: new Float32Array(n) };
   const kx = w / docW;
   const ky = h / docH;
+  const cols = new Int32Array(TILE);
   for (const [tx, ty, tile] of layer.surface.entries()) {
+    // Which cell each column of the tile falls in: the same for every row.
+    const xEnd = Math.min(TILE, docW - tx * TILE);
+    for (let x = 0; x < xEnd; x++) cols[x] = Math.min(w - 1, Math.floor((tx * TILE + x) * kx));
     for (let y = 0; y < TILE; y++) {
       const py = ty * TILE + y;
       if (py >= docH) break;
       const cy = Math.min(h - 1, Math.floor(py * ky)) * w;
-      for (let x = 0; x < TILE; x++) {
-        const o = (y * TILE + x) * 4;
+      for (let x = 0, o = y * TILE * 4; x < xEnd; x++, o += 4) {
         const al = tile[o + 3]!;
         if (al === 0) continue;
-        const px = tx * TILE + x;
-        if (px >= docW) break;
-        const i = cy + Math.min(w - 1, Math.floor(px * kx));
+        const i = cy + cols[x]!;
         const f = al / 255;
         sum.r[i]! += tile[o]! * f;
         sum.g[i]! += tile[o + 1]! * f;

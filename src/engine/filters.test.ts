@@ -122,6 +122,50 @@ describe('neighbourhood filters', () => {
     }
   });
 
+  it('a limit keeps the filter to that part of the layer, the same as a rectangular selection', () => {
+    const make = () => {
+      const { layer } = layerWith([0, 0, 0, 0]);
+      for (let y = 10; y < 90; y += 7) for (let x = 20; x < 280; x += 9) setPixel(layer, x, y, [200, 30, 60, 255]);
+      return layer;
+    };
+    const rect = { x: 100, y: 20, w: 120, h: 60 };
+    const a = make();
+    const b = make();
+    const untouched = make();
+    applyAreaFilter(a.surface, a.id, null, area.gaussian!, { radius: 4 }, ctx, rect);
+    applyAreaFilter(b.surface, b.id, Selection.rect(300, 100, rect), area.gaussian!, { radius: 4 }, ctx);
+    let differ = 0;
+    let changedOutside = 0;
+    for (let y = 0; y < 100; y++) {
+      for (let x = 0; x < 300; x++) {
+        if (a.surface.alphaAt(x, y) !== b.surface.alphaAt(x, y)) differ++;
+        const inside = x >= rect.x && x < rect.x + rect.w && y >= rect.y && y < rect.y + rect.h;
+        if (!inside && a.surface.alphaAt(x, y) !== untouched.surface.alphaAt(x, y)) changedOutside++;
+      }
+    }
+    expect(differ).toBe(0);
+    expect(changedOutside).toBe(0);
+    expect(a.surface.alphaAt(103, 24)).not.toBe(untouched.surface.alphaAt(103, 24));
+  });
+
+  it('a blur inside the limit may spread over empty pixels of it, as with a selection of that rectangle', () => {
+    const { layer } = layerWith([0, 0, 0, 0]);
+    setPixel(layer, 150, 50, [0, 0, 0, 255]);
+    const rect = { x: 100, y: 20, w: 120, h: 60 };
+    applyAreaFilter(layer.surface, layer.id, null, area.gaussian!, { radius: 6 }, ctx, rect);
+    expect(layer.surface.alphaAt(153, 50)).toBeGreaterThan(0);
+    const b = layerWith([0, 0, 0, 0]).layer;
+    setPixel(b, 150, 50, [0, 0, 0, 255]);
+    applyAreaFilter(b.surface, b.id, Selection.rect(300, 100, rect), area.gaussian!, { radius: 6 }, ctx);
+    for (let x = 140; x < 160; x++) expect(layer.surface.alphaAt(x, 50)).toBe(b.surface.alphaAt(x, 50));
+  });
+
+  it('a layer without content and no limit inside it gives nothing to filter', () => {
+    const { layer } = layerWith([0, 0, 0, 0]);
+    setPixel(layer, 10, 10, [0, 0, 0, 255]);
+    expect(applyAreaFilter(layer.surface, layer.id, null, area.gaussian!, { radius: 4 }, ctx, { x: 200, y: 50, w: 50, h: 40 })).toBeNull();
+  });
+
   it('motion blur smears along its angle only', () => {
     const { layer } = layerWith([0, 0, 0, 0]);
     setPixel(layer, 150, 50, [0, 0, 0, 255]);

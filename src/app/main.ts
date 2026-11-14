@@ -84,6 +84,8 @@ import { diffParams, parseStore, shownParams, snapshotParams, withOverrides, typ
 import { PALETTE_TOOLS } from '../ui/spec/tool-map';
 import { mountTimeline } from '../ui/timeline';
 import { mountStatusBar, type StatusInfo, type TabInfo } from '../ui/statusbar';
+import { mountScrollbars } from '../ui/canvas-scrollbars';
+import { predictPoint, type PenSample } from '../engine/predict';
 import { activeAfterClose } from './doc-tabs';
 import { loadShown, saveShown } from '../ui/palette-visibility';
 import { attachContextMenu } from '../ui/contextmenu';
@@ -106,7 +108,7 @@ import { createRulersUi, isRulerTool } from './rulers-ui';
 import { createShapesUi, isShapeTool } from './shapes-ui';
 import { createGuidesUi } from './guides-ui';
 import type { Guides } from '../engine/guides';
-import { docMatrix, isTurned, planeSize, screenDeltaToPlane, screenToDoc, screenToPlane, visibleOutline, type StageSize, type ViewState } from './view-geom';
+import { docMatrix, docToScreen, isTurned, planeSize, screenDeltaToPlane, screenToDoc, screenToPlane, visibleOutline, type StageSize, type ViewState } from './view-geom';
 import { createLayersUi } from './layers-ui';
 import { createTransformUi, type TransformMode } from './transform-ui';
 import { createCanvasResizeUi } from './canvas-resize-ui';
@@ -237,6 +239,7 @@ function resizeSurfaces(): void {
   renderer.flush();
   drawOverlay();
   rulers?.redraw();
+  scrollbars.update();
 }
 
 /**
@@ -346,12 +349,47 @@ let onViewChanged: (() => void) | null = null;
  * `interactive`: a gesture or the wheel is changing it (see `GLRenderer.setView`).
  */
 let viewEffectsQueued = false;
+
+/** The page's four corners on the stage. */
+const pageCorners = (box: StageSize): Pt[] => [docToScreen(view, box, 0, 0), docToScreen(view, box, doc.width, 0), docToScreen(view, box, doc.width, doc.height), docToScreen(view, box, 0, doc.height)];
+
+/** The page may be moved off the screen only until the middle of the stage meets its edge: it can't be lost from sight. */
+function keepPageInReach(): void {
+  const box = stageBox();
+  if (workspaceEmpty || box.w <= 0 || box.h <= 0) return;
+  // The page point under the middle of the stage must be on the page: if not, the nearest page point comes back under it.
+  const mid = { x: box.w / 2, y: box.h / 2 };
+  const under = screenToDoc(view, box, mid.x, mid.y);
+  const nearest = { x: Math.min(doc.width, Math.max(0, under.x)), y: Math.min(doc.height, Math.max(0, under.y)) };
+  if (nearest.x === under.x && nearest.y === under.y) return;
+  const at = docToScreen(view, box, nearest.x, nearest.y);
+  const moved = screenDeltaToPlane(view, box, mid.x - at.x, mid.y - at.y);
+  view.x += moved.x;
+  view.y += moved.y;
+}
+
+/** Scrollbars along the canvas; they move the view over the page (the geometry is in `ui/scroll-geom.ts`). */
+const scrollbars = mountScrollbars({
+  stage,
+  box: stageBox,
+  corners: () => pageCorners(stageBox()),
+  pan: (dx, dy) => {
+    const moved = screenDeltaToPlane(view, stageBox(), dx, dy);
+    view.x += moved.x;
+    view.y += moved.y;
+    userView = true;
+    applyView();
+  },
+});
+
 function applyView(interactive = false): void {
+  keepPageInReach();
   renderer.setView(view, interactive);
   if (viewEffectsQueued) return;
   viewEffectsQueued = true;
   requestAnimationFrame(() => {
     viewEffectsQueued = false;
+    scrollbars.update();
     onViewChanged?.();
     studio?.navigator.viewChanged();
     rulers?.suppress(isTurned(view));
@@ -447,6 +485,8 @@ function setTool(next: Tool): void {
   balloonPath = [];
   balloonHover = null;
   tool = next;
+  if (next === 'fill' || next === 'wand') selUi?.warmLook();
+  else selUi?.stopWarm();
   canvas.style.cursor = cursorFor(next);
   if (next === 'tone' && activeLayer(doc).kind !== 'tone') ensureLayer('tone');
   if (next === 'panel' || next === 'split') ensureLayer('panels');
@@ -1479,7 +1519,8 @@ function startStroke(e: PointerEvent, p: Pt): void {
     ? new MultiStroke([make(), ...(onLines ? [] : rs.mirrors).map(() => make())], [rs.follow, ...(onLines ? [] : rs.mirrors).map((m) => (q: Pt) => m(rs.follow(q)))])
     : make();
   stroke = { s, layer };
-  predFrom = null;
+  penTrail = [];
+  noteSample(e, p);
   paintCostMs = 0;
   lastPaintAt = 0;
   cursor = e.pointerType === 'mouse' && isPaintTool() ? p : null;
@@ -1623,6 +1664,7 @@ canvas.addEventListener('pointermove', (e) => {
     }
     for (const ev of list) {
       const p = toDoc(ev);
+      noteSample(ev, p);
       paintDirty(stroke.layer, stroke.s.addPoint(p.x, p.y, pressureOf(ev)));
     }
     if (showsRing(e)) {
@@ -1711,51 +1753,34 @@ function clearPrediction(): void {
   predBox = null;
 }
 
-/** The pen position the previous prediction started from, to know how fast and which way the pen is going. */
-let predFrom: { x: number; y: number } | null = null;
+/** The last pen samples of the stroke being drawn (page coordinates, event times), for the prediction. */
+let penTrail: PenSample[] = [];
+const noteSample = (ev: PointerEvent, p: Pt): void => {
+  penTrail.push({ t: ev.timeStamp, x: p.x, y: p.y });
+  if (penTrail.length > 8) penTrail.shift();
+};
 
-/**
- * The browser's predicted points overshoot when the pen is fast or turns, which showed as a line flashing away from
- * the stroke. Keep only the part that continues the real motion: no farther than the last real step, and none at all
- * when the guess points away from where the pen was heading.
- */
-function plausiblePrediction(from: { x: number; y: number }, predicted: PointerEvent[]): PointerEvent[] {
-  const before = predFrom;
-  predFrom = from;
-  if (!before) return [];
-  const sx = from.x - before.x;
-  const sy = from.y - before.y;
-  const step = Math.hypot(sx, sy);
-  if (step < 0.5) return [];
-  const kept: PointerEvent[] = [];
-  let travelled = 0;
-  let prev = from;
-  for (const pe of predicted) {
-    const q = toDoc(pe);
-    const dx = q.x - prev.x;
-    const dy = q.y - prev.y;
-    const d = Math.hypot(dx, dy);
-    if (d > 0 && (dx * sx + dy * sy) / (d * step) < 0.5) break; // turns more than 60° from the real motion
-    travelled += d;
-    if (travelled > step) break;
-    kept.push(pe);
-    prev = q;
-  }
-  return kept;
-}
+/** How far ahead of the last sample the preview reaches (ms), in two steps: about what it takes a sample to reach the screen. */
+const PREDICT_AHEAD_MS = [12, 24];
 
 /**
  * The preview is a hard, solid, round line. Only a brush that paints like that can be previewed truthfully: for a soft,
  * grainy, see-through or flowing one (the airbrush) it would flash a hard line in front of the pen that the stroke then
- * does not have. Touch screens report predicted points, so there it showed as a flicker; a mouse reports none.
+ * does not have.
  */
 const previewable = (): boolean => brush.hardness >= 0.8 && brush.opacity >= 1 && (brush.flow ?? 1) >= 1 && (brush.pressureFlow ?? 0) === 0 && (brush.grain ?? 0) === 0;
 
+/**
+ * Where the pen is about to go, drawn on the overlay: own prediction from the last samples (`engine/predict.ts`; on a recorded
+ * tablet pen its error a frame ahead was half that of the browser's predicted points, with no overshoot). Never reaches the
+ * layer or the undo history: the real stamps replace it on the next event.
+ */
 function drawPrediction(e: PointerEvent): void {
   clearPrediction();
   if (tool !== 'brush' || isTurned(view) || !previewable()) return;
-  const predicted = plausiblePrediction(toDoc(e), e.getPredictedEvents?.() ?? []);
-  if (!predicted.length) return;
+  const here = toDoc(e);
+  const ahead = PREDICT_AHEAD_MS.map((ms) => predictPoint(penTrail, ms));
+  if (!ahead[0] || !ahead[1]) return;
   const k0 = dpr() * view.scale;
   octx.setTransform(k0, 0, 0, k0, view.x * dpr(), view.y * dpr());
   const [r, g, b] = brush.color;
@@ -1763,23 +1788,16 @@ function drawPrediction(e: PointerEvent): void {
   octx.strokeStyle = `rgba(${r},${g},${b},${brush.opacity})`;
   octx.lineCap = 'round';
   octx.lineJoin = 'round';
-  let prev = toDoc(e);
-  const box = { x0: prev.x, y0: prev.y, x1: prev.x, y1: prev.y };
-  for (const pe of predicted) {
-    const q = toDoc(pe);
-    const w = Math.max(1, brush.size * (1 - brush.pressureSize * (1 - pressureOf(pe))));
-    octx.lineWidth = w;
-    octx.beginPath();
-    octx.moveTo(prev.x, prev.y);
-    octx.lineTo(q.x, q.y);
-    octx.stroke();
-    box.x0 = Math.min(box.x0, q.x - w / 2);
-    box.y0 = Math.min(box.y0, q.y - w / 2);
-    box.x1 = Math.max(box.x1, q.x + w / 2);
-    box.y1 = Math.max(box.y1, q.y + w / 2);
-    prev = q;
-  }
-  predBox = { x0: box.x0 - brush.size / 2, y0: box.y0 - brush.size / 2, x1: box.x1 + brush.size / 2, y1: box.y1 + brush.size / 2 };
+  octx.lineWidth = Math.max(1, brush.size * (1 - brush.pressureSize * (1 - pressureOf(e))));
+  octx.beginPath();
+  octx.moveTo(here.x, here.y);
+  octx.lineTo(ahead[0].x, ahead[0].y);
+  octx.lineTo(ahead[1].x, ahead[1].y);
+  octx.stroke();
+  const w = octx.lineWidth;
+  const xs = [here.x, ahead[0].x, ahead[1].x];
+  const ys = [here.y, ahead[0].y, ahead[1].y];
+  predBox = { x0: Math.min(...xs) - w, y0: Math.min(...ys) - w, x1: Math.max(...xs) + w, y1: Math.max(...ys) + w };
   octx.restore();
 }
 
@@ -1801,7 +1819,7 @@ function endPointer(): void {
     const { s, layer } = stroke;
     stroke = null;
     profiler.strokeEnd();
-    predFrom = null;
+    penTrail = [];
     const patch = s.finish();
     if (patch) {
       history.push(patchCommand(doc, patch));
@@ -2967,7 +2985,13 @@ function thumbCanvas(layer: Layer): HTMLCanvasElement {
   }
   return c;
 }
+/** What each thumbnail was drawn from (the surface, its revision and the paper colour): it is drawn again only when that changes. */
+const thumbDrawn = new WeakMap<Layer, { surface: Layer['surface']; revision: number; paper: string; kind: string }>();
 function drawThumb(layer: Layer, c: HTMLCanvasElement): void {
+  const was = thumbDrawn.get(layer);
+  const paper = layer.paperColor?.join(',') ?? '';
+  if (was && was.surface === layer.surface && was.revision === layer.surface.revision && was.paper === paper && was.kind === layer.kind) return;
+  thumbDrawn.set(layer, { surface: layer.surface, revision: layer.surface.revision, paper, kind: layer.kind });
   const px = layerThumbnail(layer, doc.width, doc.height, c.width, c.height);
   c.getContext('2d')!.putImageData(new ImageData(px, c.width, c.height), 0, 0);
 }
@@ -2986,6 +3010,7 @@ function scheduleThumbs(): void {
 
 function refreshUi(): void {
   layersUi.renderList();
+  if (tool === 'fill' || tool === 'wand') selUi?.warmLook(); // after an undo, a layer change…: compose the page the bucket looks at again
 
   const l = activeLayer(doc);
   blendSel.value = l.blend;
@@ -3196,8 +3221,11 @@ let stabByZoom = false;
 input('stabzoom').addEventListener('change', (e) => {
   stabByZoom = (e.target as HTMLInputElement).checked;
 });
-/** The stabilization setting becomes a ceiling that a quick stroke eases off (see `stabilizationAtSpeed`). */
-let stabBySpeed = false;
+/**
+ * The stabilization setting becomes a ceiling that a quick stroke eases off (see `stabilizationAtSpeed`). On by default: measured on a
+ * tablet pen, without it a stabilization of 0.6 left the line 13 px behind the pen on average (52 px in quick strokes).
+ */
+let stabBySpeed = true;
 input('stabspeed').addEventListener('change', (e) => {
   stabBySpeed = (e.target as HTMLInputElement).checked;
 });
@@ -4349,6 +4377,8 @@ mountLayoutResizers();
     return selected;
   },
   setTool,
+  brush,
+  setBrushSize,
   refreshUi,
   render,
   applyView,

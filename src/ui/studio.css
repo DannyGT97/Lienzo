@@ -400,7 +400,8 @@ dialog.spec-dialog.wide { width: min(720px, calc(94 * var(--vw))); }
 .layout-resizer:hover::after, .layout-resizer:focus-visible::after, .layout-resizer.dragging::after { background: #729fe8; }
 .grid-resizer { position: absolute; top: var(--appbar-h); bottom: 0; width: 12px; transform: translateX(-50%); cursor: col-resize; }
 .grid-resizer.left-resizer { left: calc(var(--dock-left) * var(--ui-scale)); }
-.grid-resizer.right-resizer { right: calc(var(--dock-right) * var(--ui-scale) - 6px); }
+/* Its part inside the stage is cut to 8px (the canvas scrollbar sits right beside it, see style.css --sb-gap); the pill stays where it was. */
+.grid-resizer.right-resizer { right: calc(var(--dock-right) * var(--ui-scale) - 6px); clip-path: inset(0 0 0 4px); }
 .drawer-resizer { display: none; }
 
 /* Escala de la interfaz (Preferencias > Interfaz): solo las barras y los paneles se amplían o reducen, nunca el escenario
@@ -742,7 +743,8 @@ dialog.color-settings { position: fixed; inset: 0; margin: auto; height: fit-con
 :where(html.touch-ui, html.layout-drawers) .dock-splitter::after { top: 9px; height: 3px; background: #4a4b54; }
 /* The layer buttons (blend, opacity, lock, new, duplicate, merge, delete…) stay under the header while a long list scrolls. */
 #layer-props { position: sticky; top: var(--dock-head-h, 26px); z-index: 3; background: #2d2d32; margin-top: calc(var(--palette-pad, 6px) * -1); padding-top: var(--palette-pad, 6px); padding-bottom: 4px; }
-.dock-group.sized #layer-props { top: 0; }
+/* In a palette that scrolls inside itself (given a height, or the one that fills) the scroll area already starts under the header, and a sticky box is placed inside the area's padding: pull it up by that padding, or the rows scroll visibly through the gap above the buttons. */
+.dock-group.sized #layer-props, .dock-group.fill #layer-props { top: calc(var(--palette-pad, 6px) * -1); }
 /* In a palette that was given a height the colour wheel shrinks with the room it has (header, padding and the H S V line taken off). */
 .dock-group.sized .wheel { width: min(176px, 100%, max(44px, calc(var(--dock-room, 400px) - 40px))); }
 /* The last palette shown fills the dock down to its bottom; its content scrolls inside it (the layer buttons stay in view). */
@@ -753,4 +755,3 @@ dialog.color-settings { position: fixed; inset: 0; margin: auto; height: fit-con
 .dock-group.fill { flex: 1 1 0; display: flex; flex-direction: column; overflow: hidden; }
 .dock-group.fill > .dock-body { flex: 1 1 0; min-height: 0; overflow-y: auto; }
 .dock-group.fill.collapsed { flex: none; min-height: 0 !important; }
-.dock-group.fill #layer-props { top: 0; }

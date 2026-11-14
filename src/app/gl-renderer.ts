@@ -2,6 +2,7 @@ import { adjustLut, type AdjustLut } from '../engine/adjust';
 import { BLEND_MODES, EPS, HARD_MIX_BIAS, TIE } from '../engine/blend';
 import { layerTree, type TreeNode } from '../engine/layer-tree';
 import { mipChain } from '../engine/mip';
+import { alphaBounds, type TileBounds } from '../engine/tile-bounds';
 import type { Document, Layer } from '../engine/document';
 import { TILE, type TiledSurface } from '../engine/tiles';
 import { planeSize } from './view-geom';
@@ -29,8 +30,19 @@ const MIP_BUDGET_MS = 4;
 const SETTLE_MS = 140;
 /** While a zoom keeps going, a sharp frame is composed at least this often, so what the resampled cache does not cover fills in. */
 const PROXY_MAX_MS = 120;
+/** ...and, when composing a whole page takes long, no more often than this many times what it takes (up to PROXY_WAIT_CAP_MS). */
+const PROXY_COST_FACTOR = 4;
+/**
+ * A whole-page compose that shades more than this many page-fulls of pixels (all the layers' tiles added up) is dear: on a tablet
+ * 22 of them took 130 ms. It is not repeated during a gesture while the whole-page picture backs it up. (The time itself can't be
+ * read: the CPU only queues the work.)
+ */
+const DEAR_FILL = 8;
+const PROXY_WAIT_CAP_MS = 1500;
 /** How long nothing is drawn before the whole-page picture that backs up a zoom is made again. */
 const THUMB_IDLE_MS = 400;
+/** How long nothing is drawn before what lies under the painted layer is composed and kept. */
+const BELOW_IDLE_MS = 250;
 
 interface Rect {
   x: number;
@@ -310,6 +322,11 @@ interface Target {
 interface PassState {
   src: Target;
   dst: Target;
+  /**
+   * Where `dst` differs from `src` (screen pixels, top left origin): only what the pass before this one drew. null: anywhere (the
+   * pair was just set up, or the last pass drew over the whole plane). A pass copies just this region, not the whole page.
+   */
+  stale: Rect[] | null;
 }
 
 /** What a composing pass needs to know about the view. */
@@ -352,6 +369,18 @@ export class GLRenderer {
   private linear!: WebGLSampler;
   /** Tile textures whose smaller levels match their pixels. */
   private mipFresh = new WeakSet<WebGLTexture>();
+  /**
+   * While one layer is being painted, what lies below it is composed once and kept (`below`): each frame of the stroke then draws
+   * only that layer and the ones above, not all of them. `belowKey` says what it was made for; any change to a layer below, to
+   * the view or to the stack throws it away. Only for a plain stack (no folders, the painted layer not clipped).
+   */
+  private below: Target | null = null;
+  private belowKey = '';
+  private belowValid = false;
+  private belowTimer = 0;
+  /** Layers (ids) whose pixels or mask were uploaded since the last frame's check. */
+  private dirtyLayers = new Set<number>();
+  private bounds = new WeakMap<WebGLTexture, TileBounds | null>();
   /** Tiles drawn without their smaller levels because this frame's time for building them ran out; built on the next frame. */
   private mipLate = new Map<WebGLTexture, { map: Map<number, WebGLTexture>; surface: TiledSurface; key: number }>();
   /** When this frame's time for building smaller levels ends, and how many tiles it built so far. */
@@ -392,6 +421,11 @@ export class GLRenderer {
   private quietMips = false;
   /** When the cache was last composed. */
   private composedAt = 0;
+  private composeMs = 0;
+  /** Pixels shaded by the layer passes since it was last reset, and what the last whole-page compose came to in page-fulls. */
+  private fill = 0;
+  private lastFill = 0;
+  private fullStart = 0;
   private settleTimer = 0;
   /** Spare target the cache is slid into during a pan (same size as the cache). */
   private shiftTarget: Target | null = null;
@@ -559,6 +593,9 @@ export class GLRenderer {
     this.baseSaves = [];
     this.freeTarget(this.outTarget);
     this.freeTarget(this.cache);
+    this.freeTarget(this.below);
+    this.below = null;
+    this.belowValid = false;
     this.freeTarget(this.thumb);
     this.thumb = null;
     this.thumbValid = false;
@@ -702,7 +739,13 @@ export class GLRenderer {
       this.settleTimer = window.setTimeout(() => this.settle(), SETTLE_MS);
       // A zoom that goes on for seconds never settles, and the resampled cache leaves bare what it did not cover (zooming out)
       // or looks soft (zooming in): every so often one real frame is composed.
-      if (performance.now() - this.composedAt >= PROXY_MAX_MS) this.fullDirty = true;
+      // The wait grows with what a real frame costs: a page of many layers took most of every gesture to compose that often. When
+      // a real frame is dear and the whole-page picture is there to fill what the cache does not cover, none is composed until
+      // the gesture settles (on a tablet, 38 full-size layers took 130 ms a frame).
+      const t = this.thumb_;
+      const backed = this.thumbValid && !!this.thumb && t.rot === (v.rot ?? 0) && t.flip === !!v.flip && t.w === W && t.h === H;
+      const wait = Math.min(PROXY_WAIT_CAP_MS, Math.max(PROXY_MAX_MS, this.composeMs * PROXY_COST_FACTOR));
+      if (!(backed && this.lastFill > DEAR_FILL) && performance.now() - this.composedAt >= wait) this.fullDirty = true;
       this.schedule();
       return;
     }
@@ -782,6 +825,7 @@ export class GLRenderer {
 
   /** The view changed: the page is drawn again, but nothing it is made of did, so the whole-page picture is still good. */
   private invalidateView(): void {
+    this.belowValid = false;
     this.fullDirty = true;
     this.schedule();
   }
@@ -797,6 +841,11 @@ export class GLRenderer {
       this.frame = 0;
       if (this.lost) return;
       const t0 = performance.now();
+      if (this.fullStart) {
+        const period = t0 - this.fullStart;
+        if (period <= 1000) this.composeMs = Math.max(this.composeMs, period);
+        this.fullStart = 0;
+      }
       this.draw();
       if (!this.onFrame) return;
       const cpu = performance.now() - t0;
@@ -839,7 +888,9 @@ export class GLRenderer {
     const gl = this.gl;
     let map = store.get(id);
     if (!map) store.set(id, (map = new Map()));
-    for (const key of surface.takeDirty()) {
+    const keys = surface.takeDirty();
+    if (keys.length) this.dirtyLayers.add(id);
+    for (const key of keys) {
       this.thumbValid = false;
       this.markDirty(surface.tx(key) * TILE, surface.ty(key) * TILE);
       const tile = surface.getByKey(key);
@@ -858,6 +909,7 @@ export class GLRenderer {
       gl.bindTexture(gl.TEXTURE_2D, tex);
       gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, TILE, TILE, gl.RGBA, gl.UNSIGNED_BYTE, tile);
       this.mipFresh.delete(tex);
+      this.bounds.delete(tex);
     }
   }
 
@@ -887,6 +939,18 @@ export class GLRenderer {
     const { W, H } = this.planePixels();
     this.ensureTargets(W, H);
     this.sync();
+    if (this.belowValid && this.dirtyLayers.size) {
+      // Pixels of a layer under the one being painted changed (an undo, a tool on another layer): what was kept is out of date.
+      const active = doc.layers.findIndex((l) => l.id === doc.activeId);
+      for (const id of this.dirtyLayers) {
+        const i = doc.layers.findIndex((l) => l.id === id);
+        if (i < 0 || i < active) {
+          this.belowValid = false;
+          break;
+        }
+      }
+    }
+    this.dirtyLayers.clear();
     this.mipDeadline = performance.now() + MIP_BUDGET_MS;
     this.mipDone = 0;
     if (!this.proxy) this.catchUpMips(); // while a zoom is shown resampled nothing is composed, so nothing needs the levels
@@ -925,6 +989,8 @@ export class GLRenderer {
     }
     this.dirtyDoc = null;
 
+    const composeStart = performance.now();
+    this.fill = 0;
     for (const rect of rects) {
       const final = this.compose(doc, W, H, m, full ? null : rect);
       const gy = H - rect.y - rect.h; // GL rows start at the bottom
@@ -937,6 +1003,13 @@ export class GLRenderer {
     this.cacheOy = m.oy;
     this.cacheScale = sc;
     this.composedAt = performance.now();
+    // How long a whole page takes to compose, so a gesture does not spend most of its time doing it: the calls' own time here, and
+    // (see `schedule`) the time until the next frame starts, which also holds the GPU's work that the calls only queued.
+    if (full) {
+      this.lastFill = this.fill / (W * H);
+      this.composeMs = this.composedAt - composeStart;
+      this.fullStart = composeStart;
+    }
     this.cacheRot = rot;
     this.cacheFlip = !!this.view.flip;
     this.present(m, sc, false);
@@ -945,6 +1018,10 @@ export class GLRenderer {
     if (!this.thumbValid) {
       window.clearTimeout(this.thumbTimer);
       this.thumbTimer = window.setTimeout(() => this.buildThumb(), THUMB_IDLE_MS);
+    }
+    if (!this.belowValid && this.belowSplit(doc) >= 0) {
+      window.clearTimeout(this.belowTimer);
+      this.belowTimer = window.setTimeout(() => this.buildBelow(), BELOW_IDLE_MS);
     }
   }
 
@@ -1021,6 +1098,72 @@ export class GLRenderer {
     gl.bindSampler(unit, sampler);
   }
 
+  /** Compose what lies under the painted layer over the whole plane and keep it (see `below`). Done when nothing else is going on. */
+  private buildBelow(): void {
+    const doc = this.doc;
+    if (!doc || this.lost || this.floating || this.proxy || !this.cacheValid) return;
+    const split = this.belowSplit(doc);
+    if (split < 0) return;
+    const { W, H } = this.planePixels();
+    if (W !== this.tw || H !== this.th) return;
+    const gl = this.gl;
+    const m = { ox: Math.round(this.view.x * this.dpr), oy: Math.round(this.view.y * this.dpr), s: this.view.scale * this.dpr };
+    const key = this.belowKeyFor(doc, W, H, m);
+    if (this.belowValid && this.belowKey === key) return;
+    gl.disable(gl.BLEND);
+    gl.bindVertexArray(this.vao);
+    gl.disable(gl.SCISSOR_TEST);
+    const [a0, b0] = this.targets as [Target, Target];
+    const st: PassState = { src: a0, dst: b0, stale: null };
+    this.clearTarget(st.src, W, H);
+    this.mipDeadline = performance.now() + MIP_BUDGET_MS;
+    this.mipDone = 0;
+    this.composeNodes(layerTree(doc.layers).slice(0, split), st, 0, {
+      doc,
+      W,
+      H,
+      m,
+      rect: null,
+      gy: 0,
+      sampler: m.s >= 1 ? this.nearest : this.mip,
+      x0: Math.max(0, Math.floor(-m.ox / m.s / TILE)),
+      y0: Math.max(0, Math.floor(-m.oy / m.s / TILE)),
+      x1: Math.min(Math.ceil(doc.width / TILE) - 1, Math.floor((W - m.ox) / m.s / TILE)),
+      y1: Math.min(Math.ceil(doc.height / TILE) - 1, Math.floor((H - m.oy) / m.s / TILE)),
+    });
+    this.below ??= this.makeTarget(W, H, this.floatFormat);
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, st.src.fbo);
+    gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, this.below.fbo);
+    gl.blitFramebuffer(0, 0, W, H, 0, 0, W, H, gl.COLOR_BUFFER_BIT, gl.NEAREST);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    this.belowKey = key;
+    // Tiles drawn without their smaller levels get them on the next frame (`catchUpMips`) and the picture is made again then.
+    this.belowValid = this.mipLate.size === 0;
+    if (!this.belowValid) this.schedule();
+  }
+
+  /**
+   * Where the stack splits for the cache of what lies under the painted layer: the painted layer's index, or -1 when the cache does
+   * not apply (a folder anywhere, the painted layer clipped or not a pixel layer, or too few layers under it to be worth it).
+   */
+  private belowSplit(doc: Document): number {
+    if (this.floating || doc.layers.length < 5) return -1;
+    let at = -1;
+    for (let i = 0; i < doc.layers.length; i++) {
+      const l = doc.layers[i]!;
+      if (l.kind === 'folder' || l.parent !== null) return -1;
+      if (l.id === doc.activeId) at = i;
+    }
+    if (at < 3) return -1;
+    const a = doc.layers[at]!;
+    return a.kind === 'raster' && !a.clip ? at : -1;
+  }
+
+  /** What the kept picture of the layers under the painted one is valid for. */
+  private belowKeyFor(doc: Document, W: number, H: number, m: { ox: number; oy: number; s: number }): string {
+    return `${doc.activeId}|${W}x${H}|${m.ox},${m.oy},${m.s}|${this.view.rot ?? 0}|${this.view.flip ? 1 : 0}|${doc.layers.length}`;
+  }
+
   /**
    * Composite all layers into an offscreen target and return it. With `rect` (device pixels, top-left
    * origin) only that area is recomposed: every pass is scissored to it and only the tiles that
@@ -1044,23 +1187,33 @@ export class GLRenderer {
       gl.disable(gl.SCISSOR_TEST);
     }
     const [a0, b0] = this.targets as [Target, Target];
-    const st: PassState = { src: a0, dst: b0 };
-    this.clearTarget(st.src, W, H);
+    const st: PassState = { src: a0, dst: b0, stale: null };
     // Visible part of the page, in tiles.
-    const view = {
+    const make = (r: { x: number; y: number; w: number; h: number } | null): ViewPass => ({
       doc,
       W,
       H,
       m,
-      rect,
-      gy,
+      rect: r,
+      gy: r ? H - r.y - r.h : 0,
       sampler: m.s >= 1 ? this.nearest : this.mip,
       x0: Math.max(0, Math.floor(-m.ox / m.s / TILE)),
       y0: Math.max(0, Math.floor(-m.oy / m.s / TILE)),
       x1: Math.min(Math.ceil(doc.width / TILE) - 1, Math.floor((W - m.ox) / m.s / TILE)),
       y1: Math.min(Math.ceil(doc.height / TILE) - 1, Math.floor((H - m.oy) / m.s / TILE)),
-    };
-    this.composeNodes(layerTree(doc.layers), st, 0, view);
+    });
+    const nodes = layerTree(doc.layers);
+    const split = rect ? this.belowSplit(doc) : -1;
+    if (split >= 0 && this.belowValid && this.below && this.belowKey === this.belowKeyFor(doc, W, H, m)) {
+      // The layers under the painted one are kept: start from them in the area being redrawn and draw only the rest.
+      gl.bindFramebuffer(gl.READ_FRAMEBUFFER, this.below.fbo);
+      gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, st.src.fbo);
+      gl.blitFramebuffer(rect!.x, gy, rect!.x + rect!.w, gy + rect!.h, rect!.x, gy, rect!.x + rect!.w, gy + rect!.h, gl.COLOR_BUFFER_BIT, gl.NEAREST);
+      this.composeNodes(nodes.slice(split), st, 0, make(rect));
+    } else {
+      this.clearTarget(st.src, W, H);
+      this.composeNodes(nodes, st, 0, make(rect));
+    }
     gl.disable(gl.SCISSOR_TEST);
     return st.src;
   }
@@ -1077,7 +1230,7 @@ export class GLRenderer {
   private groupPair(depth: number, W: number, H: number): PassState {
     let p = this.groupTargets[depth];
     if (!p) p = this.groupTargets[depth] = [this.makeTarget(W, H, this.floatFormat), this.makeTarget(W, H, this.floatFormat)];
-    return { src: p[0], dst: p[1] };
+    return { src: p[0], dst: p[1], stale: null };
   }
 
   /**
@@ -1163,11 +1316,8 @@ export class GLRenderer {
   ): void {
     const gl = this.gl;
     const { W, H, rect, gy, doc, m, sampler } = v;
-    // Copy the backdrop, then draw this layer over it reading the original.
-    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, st.src.fbo);
-    gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, st.dst.fbo);
-    if (rect) gl.blitFramebuffer(rect.x, gy, rect.x + rect.w, gy + rect.h, rect.x, gy, rect.x + rect.w, gy + rect.h, gl.COLOR_BUFFER_BIT, gl.NEAREST);
-    else gl.blitFramebuffer(0, 0, W, H, 0, 0, W, H, gl.COLOR_BUFFER_BIT, gl.NEAREST);
+    // Bring the other target up to date with the backdrop, then draw this layer over it reading the original.
+    this.copyBackdrop(st, v);
     gl.bindFramebuffer(gl.FRAMEBUFFER, st.dst.fbo);
     gl.viewport(0, 0, W, H);
 
@@ -1199,10 +1349,66 @@ export class GLRenderer {
       gl.uniform2f(p.u.u_origin!, 0, 0);
       gl.uniform2f(p.u.u_size!, W, H);
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+      this.fill += W * H;
     } else {
-      this.drawTiles(p, this.textures.get(layer.id), layer.surface, what.tiles ?? [], !!what.paper, doc, m, sampler);
+      this.drawTiles(p, this.textures.get(layer.id), layer.surface, what.tiles ?? [], !!what.paper, doc, m, sampler, rect ? undefined : H);
     }
     [st.src, st.dst] = [st.dst, st.src];
+    // The target that was the backdrop now differs from the new one only where this layer was drawn.
+    st.stale = what.tiles && !what.paper ? this.tileRuns(layer.surface, what.tiles, m) : null;
+  }
+
+  /** `dst` := `src` over the region where they differ (see `PassState.stale`), within the area being composed. */
+  private copyBackdrop(st: PassState, v: ViewPass): void {
+    const gl = this.gl;
+    const { W, H, rect, gy } = v;
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, st.src.fbo);
+    gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, st.dst.fbo);
+    if (!st.stale) {
+      if (rect) gl.blitFramebuffer(rect.x, gy, rect.x + rect.w, gy + rect.h, rect.x, gy, rect.x + rect.w, gy + rect.h, gl.COLOR_BUFFER_BIT, gl.NEAREST);
+      else gl.blitFramebuffer(0, 0, W, H, 0, 0, W, H, gl.COLOR_BUFFER_BIT, gl.NEAREST);
+      return;
+    }
+    for (const r of st.stale) {
+      // A little wider than the tiles: the edges of a scaled tile can reach a pixel beyond its exact bounds.
+      let x0 = Math.max(0, Math.floor(r.x) - 2);
+      let x1 = Math.min(W, Math.ceil(r.x + r.w) + 2);
+      let y0 = Math.max(0, Math.floor(r.y) - 2);
+      let y1 = Math.min(H, Math.ceil(r.y + r.h) + 2);
+      if (rect) {
+        x0 = Math.max(x0, rect.x);
+        x1 = Math.min(x1, rect.x + rect.w);
+        y0 = Math.max(y0, rect.y);
+        y1 = Math.min(y1, rect.y + rect.h);
+      }
+      if (x1 <= x0 || y1 <= y0) continue;
+      gl.blitFramebuffer(x0, H - y1, x1, H - y0, x0, H - y1, x1, H - y0, gl.COLOR_BUFFER_BIT, gl.NEAREST);
+    }
+  }
+
+  /** The screen area the tiles cover, as runs of neighbouring tiles of a row (the tiles come in row order). */
+  private tileRuns(surface: TiledSurface, keys: number[], m: { ox: number; oy: number; s: number }): Rect[] {
+    const size = TILE * m.s;
+    const runs: Rect[] = [];
+    let tx0 = 0;
+    let tx1 = -2;
+    let ty = 0;
+    const flush = (): void => {
+      if (tx1 >= tx0) runs.push({ x: m.ox + tx0 * size, y: m.oy + ty * size, w: (tx1 - tx0 + 1) * size, h: size });
+    };
+    for (const key of keys) {
+      const x = surface.tx(key);
+      const y = surface.ty(key);
+      if (y === ty && x === tx1 + 1) {
+        tx1 = x;
+        continue;
+      }
+      flush();
+      tx0 = tx1 = x;
+      ty = y;
+    }
+    flush();
+    return runs;
   }
 
   /** The table texture of an adjustment layer, rebuilt when its settings change. */
@@ -1264,6 +1470,7 @@ export class GLRenderer {
     // Scissored to the area being redrawn like every other pass.
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
     [st.src, st.dst] = [st.dst, st.src];
+    st.stale = null;
   }
 
   /**
@@ -1437,6 +1644,8 @@ export class GLRenderer {
     doc: Document,
     m: { ox: number; oy: number; s: number },
     sampler: WebGLSampler,
+    /** Plane height, when the part of each tile that has pixels is the only part to shade (a whole-page compose; see `tileBounds`). */
+    cullH?: number,
   ): void {
     const gl = this.gl;
     if (paper) {
@@ -1444,17 +1653,49 @@ export class GLRenderer {
       gl.uniform2f(p.u.u_origin!, m.ox, m.oy);
       gl.uniform2f(p.u.u_size!, doc.width * m.s, doc.height * m.s);
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+      this.fill += doc.width * m.s * doc.height * m.s;
       return;
     }
     const size = TILE * m.s;
     gl.uniform2f(p.u.u_size!, size, size);
     const mips = sampler === this.mip;
+    // A transparent pixel leaves the backdrop as it is, so only the box that holds the tile's pixels is shaded (the scissor
+    // keeps the rest of the quad from running the shader), widened by what the sampling filters can spread.
+    const pad = m.s < 1 ? 1 << MIP_LEVELS : 2;
+    if (cullH !== undefined) gl.enable(gl.SCISSOR_TEST);
     for (const key of tiles) {
       const tex = map!.get(key)!;
+      const ox = m.ox + surface.tx(key) * size;
+      const oy = m.oy + surface.ty(key) * size;
+      if (cullH !== undefined) {
+        const b = this.tileBounds(tex, surface.getByKey(key));
+        if (!b) continue;
+        const x0 = Math.max(Math.floor(ox + (b.x0 - pad) * m.s), Math.floor(ox));
+        const x1 = Math.min(Math.ceil(ox + (b.x1 + pad) * m.s), Math.ceil(ox + size));
+        const y0 = Math.max(Math.floor(oy + (b.y0 - pad) * m.s), Math.floor(oy));
+        const y1 = Math.min(Math.ceil(oy + (b.y1 + pad) * m.s), Math.ceil(oy + size));
+        if (x1 <= x0 || y1 <= y0) continue;
+        gl.scissor(x0, cullH - y1, x1 - x0, y1 - y0);
+        this.fill += (x1 - x0) * (y1 - y0);
+      } else {
+        this.fill += size * size;
+      }
       this.bindTexture(0, tex, mips && !this.ensureMips(tex, surface.getByKey(key), map!, surface, key) ? this.linear : sampler);
-      gl.uniform2f(p.u.u_origin!, m.ox + surface.tx(key) * size, m.oy + surface.ty(key) * size);
+      gl.uniform2f(p.u.u_origin!, ox, oy);
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
     }
+    if (cullH !== undefined) gl.disable(gl.SCISSOR_TEST);
+  }
+
+  /** Where the tile has visible pixels (null: none), kept until the texture is uploaded again. Unknown until a whole-page compose asks. */
+  private tileBounds(tex: WebGLTexture, data: Uint8ClampedArray | undefined): TileBounds | null {
+    if (!data) return null;
+    let b = this.bounds.get(tex);
+    if (b === undefined) {
+      b = alphaBounds(data, TILE);
+      this.bounds.set(tex, b);
+    }
+    return b;
   }
 
   /**

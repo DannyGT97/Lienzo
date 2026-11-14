@@ -86,6 +86,10 @@ export function createFiltersUi(d: FiltersDeps): {
     viewCost: number;
     /** Completes the small-window preview with everything on screen once the slider rests. */
     cancelSettle: (() => void) | null;
+    /** The part of the page the preview has filtered: null = all of it (or nothing is known yet, before the first preview). */
+    covered: Rect | null;
+    /** Waits for the view to come to rest before the preview is made again where it moved to. */
+    cancelView: (() => void) | null;
   }
   let s: Session | null = null;
 
@@ -120,20 +124,43 @@ export function createFiltersUi(d: FiltersDeps): {
   const SLOW_MS = 90;
   /** How long the slider rests before the window preview is completed (ms). */
   const SETTLE_MS = 160;
+  /**
+   * A preview covers the screen and a margin around it (half a screen each side), so zooming out a little or panning does not
+   * show the filter cut off at the old edge. It is made again only when the view has come to rest somewhere it does not reach.
+   */
+  const VIEW_MARGIN = 0.5;
+  /** The margin is cut down so that the preview never works on more than this many pixels (beyond what is on screen). */
+  const WIDE_PIXELS = 5_000_000;
+  /** How long the view must rest before a preview is made again for it (ms). */
+  const VIEW_REST_MS = 200;
 
   /**
    * The area a preview works on: the selection (or the layer), cut down to what is on screen unless `all`, and
    * (`window`) to a window around the middle of the view. `partial` says that what is on screen is not all filtered
    * yet; what is off screen is not shown, so it does not count.
    */
-  function areaOf(scope: PreviewScope, layer: Layer): { sel: Selection | null; partial: boolean } {
+  function areaOf(scope: PreviewScope, layer: Layer): { sel: Selection | null; partial: boolean; rect: Rect | null; limit?: Rect } {
     const sel = d.selection();
     const { width, height } = paintTarget(layer).surface;
-    const r = previewRect(scope === 'all' ? null : d.viewRect(), width, height, scope);
-    if (!r.rect) return { sel, partial: false };
+    let view = scope === 'all' ? null : d.viewRect();
+    if (view && scope === 'view') view = widen(view, width, height);
+    const r = previewRect(view, width, height, scope);
+    if (!r.rect) return { sel, partial: false, rect: null };
     const shown = Selection.rect(width, height, r.rect);
     if (sel) shown.combine(sel, 'intersect');
-    return { sel: shown, partial: r.partial };
+    // With no selection of the person's, a neighbourhood filter is simply limited to the rectangle (no coverage to work out).
+    return { sel: shown, partial: r.partial, rect: r.rect, limit: sel ? undefined : r.rect };
+  }
+
+  /** The view and a margin around it, as far as the pixel budget allows (never less than the view). */
+  function widen(view: Rect, width: number, height: number): Rect {
+    let k = VIEW_MARGIN;
+    const area = (m: number): number => view.w * (1 + 2 * m) * view.h * (1 + 2 * m);
+    while (k > 0 && area(k) > Math.max(WIDE_PIXELS, view.w * view.h)) k -= 0.05;
+    k = Math.max(0, k);
+    const x = Math.max(0, Math.round(view.x - view.w * k));
+    const y = Math.max(0, Math.round(view.y - view.h * k));
+    return { x, y, w: Math.min(width, Math.round(view.x + view.w * (1 + k))) - x, h: Math.min(height, Math.round(view.y + view.h * (1 + k))) - y };
   }
 
   /** Take back what the last preview did, on every layer (the last one first). */
@@ -174,18 +201,20 @@ export function createFiltersUi(d: FiltersDeps): {
     undoShown();
     const def = FILTERS[id]!;
     let partial = false;
+    let covered: Rect | null = null;
     const done: { layer: Layer; rect: Rect }[] = [];
     for (const layer of layers) {
       const surface = paintTarget(layer).surface;
       const area = areaOf(scope, layer);
       partial = partial || area.partial;
+      covered = area.rect;
       let patch = null;
       let rect: Rect | null = null;
       if (def.kind === 'pixel') {
         patch = applyPixelFilter(surface, layer.id, area.sel, def, values, d.colors());
         rect = patch?.rect ?? null;
       } else {
-        const r = applyAreaFilter(surface, layer.id, area.sel, def, values, d.colors());
+        const r = applyAreaFilter(surface, layer.id, area.limit ? null : area.sel, def, values, d.colors(), area.limit);
         if (r && 'tooLarge' in r) {
           // Nothing is left half done: what was shown on the layers before this one is taken back.
           undoShown();
@@ -207,6 +236,7 @@ export function createFiltersUi(d: FiltersDeps): {
       }
     }
     s.panel.querySelector<HTMLElement>('.note')!.hidden = !partial;
+    s.covered = covered;
     s.cost = performance.now() - began;
     if (scope === 'view') s.viewCost = s.cost;
   }
@@ -243,6 +273,8 @@ export function createFiltersUi(d: FiltersDeps): {
     if (s) s.cancelWait = null;
     s?.cancelSettle?.();
     if (s) s.cancelSettle = null;
+    s?.cancelView?.();
+    if (s) s.cancelView = null;
   }
 
   function close(): void {
@@ -323,7 +355,7 @@ export function createFiltersUi(d: FiltersDeps): {
       }
       const panel = buildPanel(id);
       d.host.append(panel);
-      s = { id, layers, values: defaultValues(def), shown: [], gpu: false, panel, cancelWait: null, cost: 0, viewCost: 0, cancelSettle: null };
+      s = { id, layers, values: defaultValues(def), shown: [], gpu: false, panel, cancelWait: null, cost: 0, viewCost: 0, cancelSettle: null, covered: null, cancelView: null };
       if (skipped) d.say(skipped === 1 ? 'Una capa elegida no se puede filtrar y se queda como está.' : `${skipped} capas elegidas no se pueden filtrar y se quedan como están.`);
       preview();
       d.refreshUi();
@@ -353,8 +385,25 @@ export function createFiltersUi(d: FiltersDeps): {
       }
     },
     viewChanged(): void {
-      if (s?.gpu) return; // the renderer shows it on the whole page, wherever the view is
-      schedule();
+      if (!s || s.gpu) return; // the renderer shows it on the whole page, wherever the view is
+      const session = s;
+      if (!session.covered) return; // everything is filtered: nothing to catch up with
+      if (session.cancelSettle) return; // a window preview is about to be completed for the view as it is
+      const view = d.viewRect();
+      const c = session.covered;
+      if (view && view.x >= c.x && view.y >= c.y && view.x + view.w <= c.x + c.w && view.y + view.h <= c.y + c.h) {
+        session.cancelView?.();
+        session.cancelView = null;
+        return; // what is on screen is inside what was filtered
+      }
+      // Moved somewhere the preview does not reach: filter there, but only once the view rests (not at every frame of a zoom).
+      session.cancelView?.();
+      const timer = window.setTimeout(() => {
+        if (s !== session) return;
+        session.cancelView = null;
+        if (!session.cancelWait) preview('view');
+      }, VIEW_REST_MS);
+      session.cancelView = () => clearTimeout(timer);
     },
   };
   return api;

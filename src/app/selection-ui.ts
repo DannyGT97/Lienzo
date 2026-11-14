@@ -76,6 +76,10 @@ export function createSelectionUi(d: SelectionDeps): {
   fillSelected(): boolean;
   /** Bucket fill: paint the area that looks like the clicked pixel with the main colour.  */
   fillAt(p: Pt): void;
+  /** Compose in the background the picture the bucket and the wand look at, so the next tap does not wait for it. */
+  warmLook(): void;
+  /** Stop that background work (the tool was left). */
+  stopWarm(): void;
   /** Select every pixel whose colour is close to `color`. */
   selectColor(color: readonly [number, number, number], tolerance: number): void;
   toggleOutline(): void;
@@ -171,36 +175,81 @@ export function createSelectionUi(d: SelectionDeps): {
    * The picture the wand and the bucket look at: the whole page (when it is small enough) or the active layer.
    * With "referred layers only" and no reference layer in the document there is nothing to look at: null.
    */
-  function lookAt(): LookPicture | null {
+  function lookAt(silent = false): LookPicture | null {
     const doc = d.doc();
     const o = d.options();
     const layer = d.activeLayer();
     const refs = doc.layers.some((l) => l.role === 'reference');
     if (o.reference && !refs) {
-      d.say('No hay capas de referencia: márcalas con el botón de referencia de la paleta de capas.');
+      if (!silent) d.say('No hay capas de referencia: márcalas con el botón de referencia de la paleta de capas.');
       return null;
     }
     if ((o.allLayers || o.reference) && doc.width * doc.height <= WAND_FLATTEN_LIMIT) {
       // Reference layers, when there are any, are what the tools look at; otherwise everything shown except drafts.
       // The page is composed one tile at a time, only where a tool looks (a flood fill that stays inside a closed
-      // area never composes the rest of the page).
+      // area never composes the rest of the page). What was composed is kept while nothing it is made of changes, so a second
+      // tap, or the tiles worked out in the background while the tool is idle (`warmLook`), cost nothing.
       const copts = refs ? ({ only: 'reference' } as const) : ({ output: true } as const);
+      const key = `${doc.width}x${doc.height}|${refs ? 'ref' : 'all'}|${stackKey(doc)}`;
+      if (!lookCache || lookCache.key !== key) lookCache = { key, tiles: new Map() };
+      const kept = lookCache.tiles;
       return {
         width: doc.width,
         height: doc.height,
         tile(tx, ty) {
+          const at = ty * Math.ceil(doc.width / TILE) + tx;
+          const have = kept.get(at);
+          if (have) return have;
           const rect = { x: tx * TILE, y: ty * TILE, w: Math.min(TILE, doc.width - tx * TILE), h: Math.min(TILE, doc.height - ty * TILE) };
           const part = flattenRegion(doc, rect, copts);
-          if (rect.w === TILE) return part; // a full-width tile already has the stride of a tile
-          const out = new Uint8ClampedArray(TILE * TILE * 4);
-          for (let row = 0; row < rect.h; row++) out.set(part.subarray(row * rect.w * 4, (row + 1) * rect.w * 4), row * TILE * 4);
+          let out = part;
+          if (rect.w !== TILE) {
+            // a tile narrower than the stride needs padding out to it
+            out = new Uint8ClampedArray(TILE * TILE * 4);
+            for (let row = 0; row < rect.h; row++) out.set(part.subarray(row * rect.w * 4, (row + 1) * rect.w * 4), row * TILE * 4);
+          }
+          kept.set(at, out);
           return out;
         },
       };
     }
-    if (o.allLayers) d.say('El lienzo es muy grande: se mira solo la capa activa.');
+    lookCache = null;
+    if (o.allLayers && !silent) d.say('El lienzo es muy grande: se mira solo la capa activa.');
     const src = layer.source ?? layer.surface;
     return { width: doc.width, height: doc.height, tile: (tx, ty) => src.get(tx, ty) ?? null };
+  }
+
+  /** The composed picture the wand and the bucket last looked at, tile by tile, and what it was composed from. */
+  let lookCache: { key: string; tiles: Map<number, Uint8ClampedArray> } | null = null;
+
+  /** Everything the composed page depends on, as text: it changes when a layer's pixels, mask, settings or place do. */
+  function stackKey(doc: Document): string {
+    return doc.layers
+      .map((l) => `${l.id}:${l.kind}:${l.parent ?? ''}:${+l.visible}:${l.opacity}:${l.blend}:${+l.clip}:${l.role}:${+!!l.through}:${l.surface.revision}:${l.mask?.enabled ? `${l.mask.base}/${l.mask.surface.revision}` : ''}:${l.paperColor?.join(',') ?? ''}:${l.adjust ? JSON.stringify(l.adjust) : ''}`)
+      .join('|');
+  }
+
+  let warmTimer = 0;
+  /** While the bucket or the wand is the tool, compose the page they look at in the background, a few milliseconds at a time. */
+  function warmLook(): void {
+    clearTimeout(warmTimer);
+    const doc = d.doc();
+    const look = lookAt(true);
+    if (!look || !lookCache) return;
+    const key = lookCache.key;
+    const tilesX = Math.ceil(doc.width / TILE);
+    const total = tilesX * Math.ceil(doc.height / TILE);
+    let next = 0;
+    const step = (): void => {
+      if (d.doc() !== doc || !lookCache || lookCache.key !== key) return; // something changed: the next tap or warm-up starts again
+      const until = performance.now() + 8;
+      while (next < total && performance.now() < until) {
+        look.tile(next % tilesX, Math.floor(next / tilesX));
+        next++;
+      }
+      if (next < total) warmTimer = window.setTimeout(step, 0);
+    };
+    warmTimer = window.setTimeout(step, 150);
   }
 
   function wand(p: Pt, mode: CombineMode): void {
@@ -557,6 +606,11 @@ export function createSelectionUi(d: SelectionDeps): {
     eraseSelected: () => apply('Borrar selección', eraseSelection),
     eraseOutsideSelection: () => apply('Borrar fuera de la selección', eraseOutside),
     fillSelected: () => apply('Rellenar selección', (s, id, sel) => (d.transparent() ? eraseSelection(s, id, sel) : fillSelection(s, id, sel, d.color()))),
+    warmLook,
+    stopWarm(): void {
+      clearTimeout(warmTimer);
+      lookCache = null; // the tool was left: the memory goes back
+    },
     fillAt(p: Pt): void {
       if (!canEditPixels()) {
         refuse();
@@ -588,6 +642,7 @@ export function createSelectionUi(d: SelectionDeps): {
       }
       // What the next identical tap would see: the picture after this fill.
       lastFill = { key: `${x},${y},${d.activeLayer().id},${version},${d.history().revision},${d.color().join()},${JSON.stringify(o)}`, at: performance.now() };
+      warmLook(); // the page has changed: compose it again while the next tap is awaited
     },
     selectColor(color: readonly [number, number, number], tolerance: number): void {
       const look = lookAt();

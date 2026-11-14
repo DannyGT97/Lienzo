@@ -35,6 +35,31 @@ button:focus-visible, select:focus-visible, input:focus-visible, textarea:focus-
 #canvas, #overlay { position: absolute; left: 0; top: 0; touch-action: none; }
 #canvas { cursor: crosshair; }
 #overlay { pointer-events: none; }
+/* Canvas scrollbars (src/ui/canvas-scrollbars.ts): a solid bar with an arrow at each end and a rounded thumb, along the right and bottom edges of the stage. */
+/* --sb-gap: the right dock's resizer (studio.css, .grid-resizer) reaches 8px into the stage (studio.css clips it); the bar is padded by that much so its track stays clear of it, and the padding looks like part of the bar. */
+#stage { --sb: calc(14px * var(--ui-scale, 1)); --sb-gap: calc(9px * var(--ui-scale, 1)); --sb-bg: #202024; --sb-thumb: #77787f; --sb-hot: #9b9ca4; }
+html.touch-ui #stage { --sb: calc(22px * var(--ui-scale, 1)); }
+html.layout-drawers #stage { --sb-gap: 0px; }
+.scrollbar { position: absolute; z-index: 3; display: flex; background: var(--sb-bg); touch-action: none; user-select: none; -webkit-user-select: none; }
+.scrollbar.sb-y { right: 0; top: 0; bottom: var(--sb); width: calc(var(--sb) + var(--sb-gap)); padding-right: var(--sb-gap); box-sizing: border-box; flex-direction: column; border-left: 1px solid var(--line); }
+.scrollbar.sb-x { left: 0; right: calc(var(--sb) + var(--sb-gap)); bottom: 0; height: var(--sb); flex-direction: row; border-top: 1px solid var(--line); }
+.sb-track { position: relative; flex: 1; min-width: 0; min-height: 0; }
+.sb-thumb { position: absolute; background: var(--sb-thumb); border-radius: 999px; }
+.sb-y .sb-thumb { left: 2px; right: 2px; }
+.sb-x .sb-thumb { top: 2px; bottom: 2px; }
+.sb-thumb:hover, .scrollbar.dragging .sb-thumb { background: var(--sb-hot); }
+.scrollbar.idle .sb-thumb { display: none; }
+.sb-arrow { flex: none; width: var(--sb); height: var(--sb); display: grid; place-items: center; color: var(--sb-thumb); }
+.sb-arrow::before { content: ''; border: 4px solid transparent; }
+.sb-y .sb-start::before { border-bottom: 5px solid currentColor; border-top-width: 0; }
+.sb-y .sb-end::before { border-top: 5px solid currentColor; border-bottom-width: 0; }
+.sb-x .sb-start::before { border-right: 5px solid currentColor; border-left-width: 0; }
+.sb-x .sb-end::before { border-left: 5px solid currentColor; border-right-width: 0; }
+.sb-arrow:hover, .sb-arrow.down { color: var(--sb-hot); }
+.scrollbar.idle .sb-arrow { opacity: 0.45; }
+/* The square where the two bars meet */
+#stage::after { content: ''; position: absolute; z-index: 3; right: 0; bottom: 0; width: calc(var(--sb) + var(--sb-gap)); height: var(--sb); background: var(--sb-bg); border-top: 1px solid var(--line); border-left: 1px solid var(--line); box-sizing: border-box; pointer-events: none; }
+html.workspace-empty .scrollbar, html.workspace-empty #stage::after { display: none; }
 .row { display: flex; gap: 4px; }
 #layer-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column-reverse; gap: 2px; }
 #layer-list li { display: flex; align-items: center; gap: 6px; min-height: var(--row-h); padding: 5px 6px; border: 1px solid transparent; border-radius: 4px; background: #424247; cursor: pointer; }

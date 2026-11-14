@@ -66,6 +66,8 @@ export class TiledSurface {
   readonly blockBytes: number;
   private readonly tiles = new Map<number, Tile>();
   private dirty = new Set<number>();
+  /** Counts every change to the pixels (a tile made, replaced, removed or marked as edited): equal numbers mean the same picture. */
+  revision = 0;
 
   constructor(
     readonly width: number,
@@ -141,7 +143,7 @@ export class TiledSurface {
     if (!t) {
       t = new Uint8ClampedArray(this.blockBytes);
       this.tiles.set(k, t);
-      this.dirty.add(k);
+      this.mark(k);
     }
     return t;
   }
@@ -152,12 +154,17 @@ export class TiledSurface {
     const k = ty * this.tilesX + tx;
     if (tile) this.tiles.set(k, tile);
     else this.tiles.delete(k);
-    this.dirty.add(k);
+    this.mark(k);
+  }
+
+  private mark(key: number): void {
+    this.dirty.add(key);
+    this.revision++;
   }
 
   /** Mark a tile as changed so renderers re-upload it. */
   touch(tx: number, ty: number): void {
-    this.dirty.add(ty * this.tilesX + tx);
+    this.mark(ty * this.tilesX + tx);
   }
 
   *entries(): IterableIterator<[number, number, Tile]> {
@@ -172,11 +179,11 @@ export class TiledSurface {
   }
 
   markAllDirty(): void {
-    for (const k of this.tiles.keys()) this.dirty.add(k);
+    for (const k of this.tiles.keys()) this.mark(k);
   }
 
   clear(): void {
-    for (const k of this.tiles.keys()) this.dirty.add(k);
+    for (const k of this.tiles.keys()) this.mark(k);
     this.tiles.clear();
   }
 

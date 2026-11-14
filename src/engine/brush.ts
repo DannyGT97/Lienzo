@@ -1,7 +1,10 @@
 import type { PaintTarget } from './document';
 import { pressureResponse, type PressureGraph } from './pressure-graph';
+import { Stabilizer } from './stabilizer';
 import type { SelectionClip } from './selection';
 import { TILE, TILE_BYTES, assertWorkingBlocks, type Rect, type Tile } from './tiles';
+
+export { STAB_SPEED_HALF, stabilizationAtSpeed, stabilizationAtZoom } from './stabilizer';
 
 export type { Rect } from './tiles';
 
@@ -106,7 +109,7 @@ export const defaultBrush: BrushSettings = {
 /** What the app needs from anything that is dragged over a layer like a pen: the pen itself and the blending tools. */
 export interface PenStroke {
   /** Add a pen sample; returns the dirty rectangle, or null if nothing changed. */
-  addPoint(x: number, y: number, pressure?: number): Rect | null;
+  addPoint(x: number, y: number, pressure?: number, t?: number): Rect | null;
   /** Note a sample without painting it (the brush is too heavy to keep up). */
   skipPoint(x: number, y: number, pressure?: number): void;
   /** The patch that undoes the stroke (null when it changed nothing). */
@@ -138,40 +141,15 @@ export interface StrokePatch {
 const smooth = (t: number): number => t * t * (3 - 2 * t);
 
 /**
- * The stabilization to use at a view scale. Smoothing each sample towards the pen leaves the
- * stroke trailing it by `s / (1 - s)` samples. A sample is a fixed distance of hand movement, i.e. of screen, so that
- * lag is already the same on screen at every zoom; dividing it by the scale (done here, only on request) makes it
- * shrink when zoomed in (detail work follows the pen closely) and grow when zoomed out, up to 4x either way.
- * Scale 1, or no scale, leaves the setting as it is.
- */
-export function stabilizationAtZoom(stabilization: number, scale?: number): number {
-  const s = Math.min(0.95, Math.max(0, stabilization));
-  if (!scale || !Number.isFinite(scale)) return s;
-  const lag = s / (1 - s) / Math.min(4, Math.max(0.25, scale));
-  return lag / (1 + lag);
-}
-
-/**
  * Samples a stroke's pressure fades in over: between 3 and 5, scaled with the stabilization setting.
  */
 export function entryRampSamples(stabilization: number): number {
   return Math.min(5, 3 + Math.round(2 * Math.min(1, Math.max(0, stabilization))));
 }
 
-/** Screen pixels per pen sample at which the speed-dependent stabilization has eased off to half its lag. */
-export const STAB_SPEED_HALF = 8;
-
-/**
- * The stabilization to use at a pen speed (screen pixels travelled per sample). Own design: the setting is the ceiling, reached by a slow hand, and the lag it leaves,
- * `s / (1 - s)` steps, shrinks as `1 / (1 + speed / STAB_SPEED_HALF)`, so a quick stroke follows the pen
- * closely and a careful one stays steady. A speed of 0 leaves the setting as it is.
- */
-export function stabilizationAtSpeed(stabilization: number, speed: number): number {
-  const s = Math.min(0.95, Math.max(0, stabilization));
-  if (!(speed > 0) || !Number.isFinite(speed)) return s;
-  const lag = s / (1 - s) / (1 + speed / STAB_SPEED_HALF);
-  return lag / (1 + lag);
-}
+/** At the end of a stroke the smoothing runs on the last sample for at most this many steps, and stops within this distance (px) of it. */
+const TAIL_STEPS = 16;
+const TAIL_DONE_PX = 0.75;
 
 /** Fraction of the size a tapered stroke starts or ends with. */
 const TAPER_MIN = 0.1;
@@ -227,9 +205,7 @@ interface TileState {
  */
 export class Stroke implements PenStroke {
   private readonly states = new Map<number, TileState>();
-  private smoothed: { x: number; y: number; p: number } | null = null;
-  /** Pen speed in screen pixels per sample, smoothed (only kept when stabilization depends on speed). */
-  private speed = 0;
+  private readonly stabilizer: Stabilizer;
   private last: { x: number; y: number; p: number; k?: number } | null = null;
   /** Path length so far, and (only when the end tapers) every point laid down, to repaint the stroke when it ends. */
   private travel = 0;
@@ -253,29 +229,15 @@ export class Stroke implements PenStroke {
     // The per-tile snapshots and coverage masks below are TILE-sized; a surface cut differently would be corrupted.
     assertWorkingBlocks(target.surface);
     this.response = settings.pressureGraph?.length ? pressureResponse(settings.pressureGraph) : null;
+    this.stabilizer = new Stabilizer({ stabilization: settings.stabilization, zoom: settings.stabilizationZoom, bySpeed: settings.stabilizationBySpeed });
   }
 
-  /** Add a pen sample; returns the dirty rectangle, or null if nothing changed. */
-  addPoint(x: number, y: number, rawPressure = 1): Rect | null {
+  /** Add a pen sample (`t`: its time in ms, when known, so the smoothing is by time and not by sample); returns the dirty rectangle, or null if nothing changed. */
+  addPoint(x: number, y: number, rawPressure = 1, t?: number): Rect | null {
     const shaped = this.shape(rawPressure);
     const pressure = shaped * this.entryFactor();
-    const prev = this.lastInput;
     this.lastInput = { x, y, p: shaped };
-    let stab = stabilizationAtZoom(this.settings.stabilization, this.settings.stabilizationZoom);
-    if (this.settings.stabilizationBySpeed) {
-      // Raw samples jitter, so the speed is itself smoothed; it is measured on screen like the zoom's lag.
-      const scale = this.settings.stabilizationZoom;
-      const onScreen = scale && Number.isFinite(scale) ? scale : 1;
-      const step = prev ? Math.hypot(x - prev.x, y - prev.y) * onScreen : 0;
-      this.speed += (step - this.speed) * 0.5;
-      stab = stabilizationAtSpeed(stab, this.speed);
-    }
-    const k = 1 - stab;
-    const s = this.smoothed;
-    this.smoothed = s
-      ? { x: s.x + (x - s.x) * k, y: s.y + (y - s.y) * k, p: s.p + (pressure - s.p) * k }
-      : { x, y, p: pressure };
-    return this.curveTo(this.smoothed);
+    return this.curveTo(this.stabilizer.next(x, y, pressure, t));
   }
 
   /**
@@ -350,7 +312,17 @@ export class Stroke implements PenStroke {
     // The curve stops at the midpoint of the last pair: finish the path at the last
     // smoothed sample, then catch up to the last raw one (stabilization lags behind it).
     if (this.ctrl) this.moveTo(this.ctrl);
-    if (this.lastInput && this.smoothed) this.moveTo(this.lastInput);
+    const raw = this.lastInput;
+    if (raw && this.stabilizer.current) {
+      // Let the smoothing run its course on the last sample: the stroke closes in on the pen along its own curve, and what is
+      // left is a short step, instead of one straight line from where the smoothing had got to (up to tens of pixels long).
+      for (let i = 0; i < TAIL_STEPS; i++) {
+        const at = this.stabilizer.current;
+        if (Math.hypot(at.x - raw.x, at.y - raw.y) < TAIL_DONE_PX) break;
+        this.curveTo(this.stabilizer.next(raw.x, raw.y, raw.p));
+      }
+      this.moveTo(raw);
+    }
     if ((this.settings.taperOut ?? 0) > 0 && this.trail.length > 1) this.retrace();
     const b = this.bounds;
     if (!b) return null;

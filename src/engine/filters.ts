@@ -1,7 +1,7 @@
 import type { StrokePatch } from './brush';
 import type { Selection } from './selection';
 import { mapPixels } from './selection';
-import type { Rect, TiledSurface } from './tiles';
+import { TILE, type Rect, type TiledSurface } from './tiles';
 import { TileRecorder } from './transform';
 
 export type RGB = readonly [number, number, number];
@@ -206,23 +206,68 @@ function boxSizes(sigma: number, n = 3): number[] {
 
 /** One box blur of the given radius along one axis (zero outside the block). */
 function boxBlur(src: Float32Array, dst: Float32Array, w: number, h: number, r: number, horizontal: boolean): void {
-  const len = horizontal ? w : h;
-  const lines = horizontal ? h : w;
-  const stepIn = horizontal ? 4 : w * 4;
-  const stepLine = horizontal ? w * 4 : 4;
   const inv = 1 / (2 * r + 1);
-  for (let line = 0; line < lines; line++) {
-    const base = line * stepLine;
-    for (let c = 0; c < 4; c++) {
-      let sum = 0;
-      for (let i = -r; i <= r; i++) if (i >= 0 && i < len) sum += src[base + i * stepIn + c]!;
-      for (let i = 0; i < len; i++) {
-        dst[base + i * stepIn + c] = sum * inv;
+  if (horizontal) {
+    // One line at a time with the four channels together: the window slides along the line.
+    for (let line = 0; line < h; line++) {
+      const base = line * w * 4;
+      let s0 = 0;
+      let s1 = 0;
+      let s2 = 0;
+      let s3 = 0;
+      for (let i = 0; i <= r && i < w; i++) {
+        const k = base + i * 4;
+        s0 += src[k]!;
+        s1 += src[k + 1]!;
+        s2 += src[k + 2]!;
+        s3 += src[k + 3]!;
+      }
+      for (let i = 0; i < w; i++) {
+        const k = base + i * 4;
+        dst[k] = s0 * inv;
+        dst[k + 1] = s1 * inv;
+        dst[k + 2] = s2 * inv;
+        dst[k + 3] = s3 * inv;
         const out = i - r;
         const inn = i + r + 1;
-        if (out >= 0) sum -= src[base + out * stepIn + c]!;
-        if (inn < len) sum += src[base + inn * stepIn + c]!;
+        if (out >= 0) {
+          const o = base + out * 4;
+          s0 -= src[o]!;
+          s1 -= src[o + 1]!;
+          s2 -= src[o + 2]!;
+          s3 -= src[o + 3]!;
+        }
+        if (inn < w) {
+          const n = base + inn * 4;
+          s0 += src[n]!;
+          s1 += src[n + 1]!;
+          s2 += src[n + 2]!;
+          s3 += src[n + 3]!;
+        }
       }
+    }
+    return;
+  }
+  // Down the page the same way, but a whole row at a time: one running sum per column, so memory is read in order (walking a
+  // column by itself jumps a full row at every step and used the cache badly).
+  const row = w * 4;
+  const sums = new Float64Array(row);
+  for (let i = 0; i <= r && i < h; i++) {
+    const base = i * row;
+    for (let k = 0; k < row; k++) sums[k]! += src[base + k]!;
+  }
+  for (let i = 0; i < h; i++) {
+    const base = i * row;
+    for (let k = 0; k < row; k++) dst[base + k] = sums[k]! * inv;
+    const out = i - r;
+    const inn = i + r + 1;
+    if (out >= 0) {
+      const o = out * row;
+      for (let k = 0; k < row; k++) sums[k]! -= src[o + k]!;
+    }
+    if (inn < h) {
+      const n = inn * row;
+      for (let k = 0; k < row; k++) sums[k]! += src[n + k]!;
     }
   }
 }
@@ -259,24 +304,47 @@ const motionBlur: AreaFilter = {
     const dx = Math.cos(a);
     const dy = -Math.sin(a);
     const n = Math.max(1, Math.round(v.distance!));
+    // The offsets of the samples along the line are the same for every pixel: worked out once. Pixels far enough from the edges
+    // need no bounds test at all.
+    const ox = new Int32Array(n);
+    const oy = new Int32Array(n);
+    const off = new Int32Array(n);
+    let reach = 0;
+    for (let k = 0; k < n; k++) {
+      const t = k - (n - 1) / 2;
+      ox[k] = Math.round(dx * t);
+      oy[k] = Math.round(dy * t);
+      off[k] = (oy[k]! * w + ox[k]!) * 4;
+      reach = Math.max(reach, Math.abs(ox[k]!), Math.abs(oy[k]!));
+    }
     for (let y = 0; y < h; y++) {
+      const edgeY = y < reach || y >= h - reach;
       for (let x = 0; x < w; x++) {
         let r = 0;
         let g = 0;
         let b = 0;
         let al = 0;
-        for (let k = 0; k < n; k++) {
-          const t = k - (n - 1) / 2;
-          const sx = Math.round(x + dx * t);
-          const sy = Math.round(y + dy * t);
-          if (sx < 0 || sy < 0 || sx >= w || sy >= h) continue;
-          const i = (sy * w + sx) * 4;
-          r += buf[i]!;
-          g += buf[i + 1]!;
-          b += buf[i + 2]!;
-          al += buf[i + 3]!;
-        }
         const o = (y * w + x) * 4;
+        if (!edgeY && x >= reach && x < w - reach) {
+          for (let k = 0; k < n; k++) {
+            const i = o + off[k]!;
+            r += buf[i]!;
+            g += buf[i + 1]!;
+            b += buf[i + 2]!;
+            al += buf[i + 3]!;
+          }
+        } else {
+          for (let k = 0; k < n; k++) {
+            const sx = x + ox[k]!;
+            const sy = y + oy[k]!;
+            if (sx < 0 || sy < 0 || sx >= w || sy >= h) continue;
+            const i = (sy * w + sx) * 4;
+            r += buf[i]!;
+            g += buf[i + 1]!;
+            b += buf[i + 2]!;
+            al += buf[i + 3]!;
+          }
+        }
         out[o] = r / n;
         out[o + 1] = g / n;
         out[o + 2] = b / n;
@@ -456,7 +524,18 @@ const radialBlur: AreaFilter = {
     const span = zoom ? v.amount! / 100 : (v.amount! * Math.PI) / 180; // zoom: fraction of the radius; spin: arc in radians
     const reach = Math.hypot(Math.max(cx, w - cx), Math.max(cy, h - cy));
     const n = Math.max(3, Math.min(48, Math.ceil(zoom ? span * reach : span * reach * 0.5)));
-    const px = [0, 0, 0, 0];
+    // What depends only on the sample (not on the pixel) is worked out once: the scale of a zoom step, the cosine and sine of a turn.
+    const zs = new Float64Array(n);
+    const co = new Float64Array(n);
+    const si = new Float64Array(n);
+    for (let k = 0; k < n; k++) {
+      const t = n === 1 ? 0 : k / (n - 1) - 0.5;
+      if (zoom) zs[k] = 1 + t * span;
+      else {
+        co[k] = Math.cos(t * span);
+        si[k] = Math.sin(t * span);
+      }
+    }
     for (let y = 0; y < h; y++) {
       for (let x = 0; x < w; x++) {
         const dx = x - cx;
@@ -466,25 +545,62 @@ const radialBlur: AreaFilter = {
         let b = 0;
         let a = 0;
         for (let k = 0; k < n; k++) {
-          const t = n === 1 ? 0 : k / (n - 1) - 0.5;
           let sx: number;
           let sy: number;
           if (zoom) {
-            const s = 1 + t * span;
-            sx = cx + dx * s;
-            sy = cy + dy * s;
+            sx = cx + dx * zs[k]!;
+            sy = cy + dy * zs[k]!;
           } else {
-            const ang = t * span;
-            const co = Math.cos(ang);
-            const si = Math.sin(ang);
-            sx = cx + dx * co - dy * si;
-            sy = cy + dx * si + dy * co;
+            sx = cx + dx * co[k]! - dy * si[k]!;
+            sy = cy + dx * si[k]! + dy * co[k]!;
           }
-          sampleBilinear(buf, w, h, sx, sy, px);
-          r += px[0]!;
-          g += px[1]!;
-          b += px[2]!;
-          a += px[3]!;
+          // Bilinear sample, inline (the same weights as `sampleBilinear`).
+          const x0 = Math.floor(sx);
+          const y0 = Math.floor(sy);
+          const fx = sx - x0;
+          const fy = sy - y0;
+          const inX0 = x0 >= 0 && x0 < w;
+          const inX1 = x0 + 1 >= 0 && x0 + 1 < w;
+          const inY0 = y0 >= 0 && y0 < h;
+          const inY1 = y0 + 1 >= 0 && y0 + 1 < h;
+          if (inY0) {
+            const row = y0 * w;
+            if (inX0) {
+              const wt = (1 - fx) * (1 - fy);
+              const o = (row + x0) * 4;
+              r += buf[o]! * wt;
+              g += buf[o + 1]! * wt;
+              b += buf[o + 2]! * wt;
+              a += buf[o + 3]! * wt;
+            }
+            if (inX1) {
+              const wt = fx * (1 - fy);
+              const o = (row + x0 + 1) * 4;
+              r += buf[o]! * wt;
+              g += buf[o + 1]! * wt;
+              b += buf[o + 2]! * wt;
+              a += buf[o + 3]! * wt;
+            }
+          }
+          if (inY1) {
+            const row = (y0 + 1) * w;
+            if (inX0) {
+              const wt = (1 - fx) * fy;
+              const o = (row + x0) * 4;
+              r += buf[o]! * wt;
+              g += buf[o + 1]! * wt;
+              b += buf[o + 2]! * wt;
+              a += buf[o + 3]! * wt;
+            }
+            if (inX1) {
+              const wt = fx * fy;
+              const o = (row + x0 + 1) * 4;
+              r += buf[o]! * wt;
+              g += buf[o + 1]! * wt;
+              b += buf[o + 2]! * wt;
+              a += buf[o + 3]! * wt;
+            }
+          }
         }
         const o = (y * w + x) * 4;
         out[o] = r / n;
@@ -721,9 +837,50 @@ export function applyPixelFilter(surface: TiledSurface, layerId: number, sel: Se
 
 export type AreaResult = { patch: StrokePatch | null; rect: Rect } | { tooLarge: true } | null;
 
-/** Run a neighbourhood filter on the layer (or the selection). Returns null when there is nothing to filter. */
-export function applyAreaFilter(surface: TiledSurface, layerId: number, sel: Selection | null, f: AreaFilter, v: Values, ctx: FilterContext): AreaResult {
-  const base = sel ? sel.bounds() : surface.contentBounds();
+/**
+ * The selection's coverage (0..255) over `region`, one byte per pixel, or null when it covers all of it fully (tile by tile, so
+ * a rectangle holding the region costs nothing).
+ */
+function coverageOver(sel: Selection, region: Rect): Uint8Array | null {
+  let full = true;
+  const tx0 = Math.floor(region.x / TILE);
+  const ty0 = Math.floor(region.y / TILE);
+  const tx1 = Math.floor((region.x + region.w - 1) / TILE);
+  const ty1 = Math.floor((region.y + region.h - 1) / TILE);
+  for (let ty = ty0; ty <= ty1 && full; ty++) for (let tx = tx0; tx <= tx1; tx++) if (sel.tile(tx, ty) !== 255) { full = false; break; }
+  if (full) return null;
+  const cov = new Uint8Array(region.w * region.h);
+  for (let ty = ty0; ty <= ty1; ty++) {
+    for (let tx = tx0; tx <= tx1; tx++) {
+      const t = sel.tile(tx, ty);
+      if (t === 0) continue;
+      const xa = Math.max(region.x, tx * TILE);
+      const xb = Math.min(region.x + region.w, (tx + 1) * TILE);
+      const ya = Math.max(region.y, ty * TILE);
+      const yb = Math.min(region.y + region.h, (ty + 1) * TILE);
+      for (let y = ya; y < yb; y++) {
+        const o = (y - region.y) * region.w - region.x;
+        if (t === 255) cov.fill(255, o + xa, o + xb);
+        else for (let x = xa; x < xb; x++) cov[o + x] = t[(y - ty * TILE) * TILE + (x - tx * TILE)]!;
+      }
+    }
+  }
+  return cov;
+}
+
+/**
+ * Run a neighbourhood filter on the layer (or the selection). Returns null when there is nothing to filter. `limit`: only this part
+ * of the layer is filtered (what a preview shows); the selection, when there is one, narrows it further.
+ */
+export function applyAreaFilter(surface: TiledSurface, layerId: number, sel: Selection | null, f: AreaFilter, v: Values, ctx: FilterContext, limit?: Rect): AreaResult {
+  let base: Rect | null = sel ? sel.bounds() : surface.contentBounds();
+  if (base && limit) {
+    const x0 = Math.max(base.x, limit.x);
+    const y0 = Math.max(base.y, limit.y);
+    const x1 = Math.min(base.x + base.w, limit.x + limit.w);
+    const y1 = Math.min(base.y + base.h, limit.y + limit.h);
+    base = x1 > x0 && y1 > y0 ? { x: x0, y: y0, w: x1 - x0, h: y1 - y0 } : null;
+  }
   if (!base) return null;
   const m = f.margin(v);
   const x0 = Math.max(0, Math.floor(base.x) - m);
@@ -747,19 +904,44 @@ export function applyAreaFilter(surface: TiledSurface, layerId: number, sel: Sel
   }
   const buf = orig.slice();
   f.run(buf, region.w, region.h, v, ctx);
+  const cover = sel ? coverageOver(sel, region) : null;
+  // With a limit only that part changes: the margin around it gave the filter its surroundings and is written back as it was.
+  const box = limit && !sel ? limit : null;
   const out = new Uint8ClampedArray(n * 4);
-  for (let y = 0; y < region.h; y++) {
-    for (let x = 0; x < region.w; x++) {
-      const i = y * region.w + x;
-      const cov = sel ? sel.at(region.x + x, region.y + y) / 255 : 1;
-      const a = orig[i * 4 + 3]! + (buf[i * 4 + 3]! - orig[i * 4 + 3]!) * cov;
-      if (a <= 0.0005) continue;
-      for (let c = 0; c < 3; c++) {
-        const pm = orig[i * 4 + c]! + (buf[i * 4 + c]! - orig[i * 4 + c]!) * cov;
-        out[i * 4 + c] = Math.min(255, (pm / a) * 255);
+  for (let i = 0; i < n; i++) {
+    if (box) {
+      const px = region.x + (i % region.w);
+      const py = region.y + Math.floor(i / region.w);
+      if (px < box.x || py < box.y || px >= box.x + box.w || py >= box.y + box.h) {
+        out[i * 4] = src[i * 4]!;
+        out[i * 4 + 1] = src[i * 4 + 1]!;
+        out[i * 4 + 2] = src[i * 4 + 2]!;
+        out[i * 4 + 3] = src[i * 4 + 3]!;
+        continue;
       }
-      out[i * 4 + 3] = a * 255;
     }
+    let a: number;
+    let pm0: number;
+    let pm1: number;
+    let pm2: number;
+    if (cover) {
+      const cov = cover[i]! / 255;
+      a = orig[i * 4 + 3]! + (buf[i * 4 + 3]! - orig[i * 4 + 3]!) * cov;
+      if (a <= 0.0005) continue;
+      pm0 = orig[i * 4]! + (buf[i * 4]! - orig[i * 4]!) * cov;
+      pm1 = orig[i * 4 + 1]! + (buf[i * 4 + 1]! - orig[i * 4 + 1]!) * cov;
+      pm2 = orig[i * 4 + 2]! + (buf[i * 4 + 2]! - orig[i * 4 + 2]!) * cov;
+    } else {
+      a = buf[i * 4 + 3]!;
+      if (a <= 0.0005) continue;
+      pm0 = buf[i * 4]!;
+      pm1 = buf[i * 4 + 1]!;
+      pm2 = buf[i * 4 + 2]!;
+    }
+    out[i * 4] = Math.min(255, (pm0 / a) * 255);
+    out[i * 4 + 1] = Math.min(255, (pm1 / a) * 255);
+    out[i * 4 + 2] = Math.min(255, (pm2 / a) * 255);
+    out[i * 4 + 3] = a * 255;
   }
   surface.writeRect(region, out);
   return { patch: rec.patch(region), rect: region };

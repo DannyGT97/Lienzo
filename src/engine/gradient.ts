@@ -156,6 +156,17 @@ export function applyGradient(surface: TiledSurface, layerId: number, sel: Selec
   const ink = new Float32Array(LUT + 1); // the ink amount along the gradient, for the halftone
   if (ht) for (let i = 0; i <= LUT; i++) ink[i] = erase ? lut[i * 4 + 3]! : lut[i * 4 + 3]! * (1 - (0.299 * lut[i * 4]! + 0.587 * lut[i * 4 + 1]! + 0.114 * lut[i * 4 + 2]!) / 255);
   let changed = false;
+  // What does not change from pixel to pixel is worked out once: the line's vector and, per row, the part of the position that
+  // comes from the row. The loop below visits every pixel of the page, so it avoids calls and the divisions it can.
+  const fx = spec.from.x;
+  const fy = spec.from.y;
+  const dx = spec.to.x - fx;
+  const dy = spec.to.y - fy;
+  const len2 = dx * dx + dy * dy;
+  const radius = Math.sqrt(len2);
+  const turn0 = Math.atan2(dy, dx);
+  const shape = len2 === 0 ? 'degenerate' : spec.shape;
+  const repeat = spec.repeat ?? 'clamp';
   for (let ty = Math.floor(y0 / TILE); ty <= Math.floor((y1 - 1) / TILE); ty++) {
     for (let tx = Math.floor(x0 / TILE); tx <= Math.floor((x1 - 1) / TILE); tx++) {
       const cov = sel ? sel.tile(tx, ty) : 255;
@@ -168,10 +179,37 @@ export function applyGradient(surface: TiledSurface, layerId: number, sel: Selec
       const xa = Math.max(x0, tx * TILE);
       const xb = Math.min(x1, tx * TILE + TILE);
       for (let y = ya; y < yb; y++) {
-        for (let x = xa; x < xb; x++) {
+        const yc = y + 0.5;
+        const rowDy = yc - fy;
+        const rowTerm = rowDy * dy;
+        const rowSq = rowDy * rowDy;
+        let o = ((y - ty * TILE) * TILE + (xa - tx * TILE)) * 4;
+        for (let x = xa; x < xb; x++, o += 4) {
           const c = cov === 255 ? 1 : cov[(y - ty * TILE) * TILE + (x - tx * TILE)]! / 255;
           if (c === 0) continue;
-          const u = extendPosition(position(spec, x + 0.5, y + 0.5), spec.repeat);
+          const xc = x + 0.5;
+          let pos: number;
+          switch (shape) {
+            case 'linear':
+              pos = ((xc - fx) * dx + rowTerm) / len2;
+              break;
+            case 'mirrored':
+              pos = Math.abs(((xc - fx) * dx + rowTerm) / len2);
+              break;
+            case 'radial': {
+              const ddx = xc - fx;
+              pos = Math.sqrt(ddx * ddx + rowSq) / radius;
+              break;
+            }
+            case 'conic': {
+              const turn = (Math.atan2(rowDy, xc - fx) - turn0) / (2 * Math.PI);
+              pos = turn - Math.floor(turn);
+              break;
+            }
+            default:
+              pos = 1;
+          }
+          const u = extendPosition(pos, repeat);
           if (u === null) continue;
           const li = Math.round(u * LUT) * 4;
           let ga = lut[li + 3]!;
@@ -190,7 +228,6 @@ export function applyGradient(surface: TiledSurface, layerId: number, sel: Selec
             gg = ditherChannel(gg, x, y);
             gb = ditherChannel(gb, x, y);
           }
-          const o = ((y - ty * TILE) * TILE + (x - tx * TILE)) * 4;
           const ba = tile[o + 3]! / 255;
           if (erase) {
             tile[o + 3] = ba * (1 - ga * c) * 255;
@@ -199,6 +236,15 @@ export function applyGradient(surface: TiledSurface, layerId: number, sel: Selec
           }
           const ta = ga * c;
           if (ta <= 0) continue;
+          if (ba === 0) {
+            // Over nothing the gradient's colour is the result as it is.
+            tile[o] = gr;
+            tile[o + 1] = gg;
+            tile[o + 2] = gb;
+            tile[o + 3] = ta * 255;
+            changed = true;
+            continue;
+          }
           const ra = ta + ba * (1 - ta);
           const w = (1 - ta) * ba;
           tile[o] = (ta * gr + w * tile[o]!) / ra;
