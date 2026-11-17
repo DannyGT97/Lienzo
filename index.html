@@ -64,6 +64,14 @@
           <label>Dureza <span id="hardness-v"></span><input id="hardness" type="range" min="0" max="100" value="80" /></label>
           <label>Opacidad <span id="opacity-v"></span><input id="opacity" type="range" min="0.1" max="100" step="0.1" value="100" /></label>
           <label>Estabilización <span id="stab-v"></span><input id="stab" type="range" min="0" max="95" value="30" /></label>
+          <label title="Al levantar el lápiz alisa el trazo entero sin moverlo de sitio; las esquinas se conservan">Corrección del trazo
+            <select id="correction">
+              <option value="0">Nada</option>
+              <option value="1">Débil</option>
+              <option value="2" selected>Medio</option>
+              <option value="3">Fuerte</option>
+            </select>
+          </label>
           <label><input id="psize" type="checkbox" checked /> Presión → tamaño</label>
           <label>Presión → opacidad <span id="popacity-v"></span><input id="popacity" type="range" min="0" max="100" value="0" /></label>
           <label>Presión → flujo <span id="pflow-v"></span><input id="pflow" type="range" min="0" max="100" value="0" /></label>
@@ -77,8 +85,6 @@
           <label>Textura de papel <span id="grain-v"></span><input id="grain" type="range" min="0" max="100" value="0" /></label>
           <label>Tamaño del grano <span id="grainscale-v"></span><input id="grainscale" type="range" min="1" max="40" value="6" /></label>
           <label><input id="predict" type="checkbox" checked /> Predicción del trazo</label>
-          <label title="Con zoom la línea sigue más de cerca al lápiz y alejado se suaviza más. Desactivada (por defecto), el retardo en pantalla es el mismo a cualquier zoom"><input id="stabzoom" type="checkbox" /> Estabilización según el zoom</label>
-          <label title="La estabilización marcada es el máximo (mano lenta); al trazar rápido se reduce para que la línea siga al lápiz. Algoritmo propio, no el de Clip Studio"><input id="stabspeed" type="checkbox" checked /> Estabilización según la velocidad</label>
           <label title="Suavizado del borde: Ninguno deja el borde duro, Fuerte lo difumina más">Antialiasing
             <select id="antialias">
               <option value="0">Ninguno</option>

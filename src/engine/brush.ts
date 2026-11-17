@@ -1,10 +1,11 @@
 import type { PaintTarget } from './document';
 import { pressureResponse, type PressureGraph } from './pressure-graph';
 import { Stabilizer } from './stabilizer';
+import { correctPath, correctionSigma, type Correction } from './stroke-correct';
 import type { SelectionClip } from './selection';
 import { TILE, TILE_BYTES, assertWorkingBlocks, type Rect, type Tile } from './tiles';
 
-export { STAB_SPEED_HALF, stabilizationAtSpeed, stabilizationAtZoom } from './stabilizer';
+export { STAB_SPEED_HALF, stabilizationAtSpeed } from './stabilizer';
 
 export type { Rect } from './tiles';
 
@@ -45,10 +46,12 @@ export interface BrushSettings {
   nibThickness?: number;
   /** Direction of the nib's length in degrees, 0 = horizontal and turning clockwise on screen. */
   nibAngle?: number;
-  /** View scale (screen pixels per page pixel) when the stroke starts. Only set when the "by zoom" option is on: stabilization then eases off when zoomed in and grows when zoomed out. Unset, it lags the same distance on screen at any zoom. */
-  stabilizationZoom?: number;
   /** Ease the stabilization off as the pen speeds up (see `stabilizationAtSpeed`); `stabilization` is then the most it applies. */
   stabilizationBySpeed?: boolean;
+  /** Stroke correction (see `stroke-correct.ts`): when the pen is lifted the path is smoothed and painted again. 0 none … 3 strong; unset = none (the app sets the medium level on its brushes). */
+  correction?: Correction;
+  /** View scale (screen pixels per page pixel) when the stroke starts: the pen's speed and the correction are measured on screen, so they feel the same at any zoom. Unset = 1. */
+  viewScale?: number;
   /**
    * Samples over which the pressure fades in at the start of the stroke (0 = off): sample n of N is scaled by
    * sin(90° · (n+1) / (N+1)) (a plain n / N ramp would make a tap invisible). It scales with the smoothing level (see `entryRampSamples`), so a stabilized
@@ -229,7 +232,7 @@ export class Stroke implements PenStroke {
     // The per-tile snapshots and coverage masks below are TILE-sized; a surface cut differently would be corrupted.
     assertWorkingBlocks(target.surface);
     this.response = settings.pressureGraph?.length ? pressureResponse(settings.pressureGraph) : null;
-    this.stabilizer = new Stabilizer({ stabilization: settings.stabilization, zoom: settings.stabilizationZoom, bySpeed: settings.stabilizationBySpeed });
+    this.stabilizer = new Stabilizer({ stabilization: settings.stabilization, bySpeed: settings.stabilizationBySpeed, scale: settings.viewScale });
   }
 
   /** Add a pen sample (`t`: its time in ms, when known, so the smoothing is by time and not by sample); returns the dirty rectangle, or null if nothing changed. */
@@ -323,7 +326,7 @@ export class Stroke implements PenStroke {
       }
       this.moveTo(raw);
     }
-    if ((this.settings.taperOut ?? 0) > 0 && this.trail.length > 1) this.retrace();
+    if (this.trail.length > 1 && (this.correcting() > 0 || (this.settings.taperOut ?? 0) > 0)) this.retrace();
     const b = this.bounds;
     if (!b) return null;
     const surface = this.target.surface;
@@ -356,7 +359,7 @@ export class Stroke implements PenStroke {
     if (from) this.travel += Math.hypot(to.x - from.x, to.y - from.y);
     const point = { ...to, k: this.taper(this.travel) };
     this.last = point;
-    if ((this.settings.taperOut ?? 0) > 0) this.trail.push({ x: to.x, y: to.y, p: to.p, s: this.travel });
+    if (this.keepsTrail()) this.trail.push({ x: to.x, y: to.y, p: to.p, s: this.travel });
     return this.lay(from ?? point, point);
   }
 
@@ -404,8 +407,30 @@ export class Stroke implements PenStroke {
     return k;
   }
 
-  /** The pen is up and the length is known: paint the stroke again, this time thinning out towards its end. */
+  /** The spread of the stroke correction in page pixels (0 = off). */
+  private correcting(): number {
+    return correctionSigma(this.settings.correction, this.settings.viewScale);
+  }
+
+  /** Whether every point laid down is kept, to paint the stroke again when it ends (thinning out, or corrected). */
+  private keepsTrail(): boolean {
+    return (this.settings.taperOut ?? 0) > 0 || this.correcting() > 0;
+  }
+
+  /** The pen is up and the length is known: paint the stroke again, corrected and thinning out towards its end. */
   private retrace(): void {
+    const sigma = this.correcting();
+    if (sigma > 0) {
+      // Points come out about as far apart as the live curve lays them (see `curveTo`), so the repaint costs what the stroke did.
+      const step = Math.min(40, Math.max(2.5, (this.diameter(1) / 2) * 0.35));
+      const fixed = correctPath(this.trail, sigma, step);
+      let along = 0;
+      this.trail = fixed.map((q, i) => {
+        if (i > 0) along += Math.hypot(q.x - fixed[i - 1]!.x, q.y - fixed[i - 1]!.y);
+        return { x: q.x, y: q.y, p: q.p, s: along };
+      });
+      this.travel = along;
+    }
     const surface = this.target.surface;
     const earlier = this.bounds;
     for (const [key, st] of this.states) surface.put(surface.tx(key), surface.ty(key), st.base ?? undefined);

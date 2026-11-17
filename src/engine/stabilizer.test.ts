@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { STAB_SAMPLE_MS, Stabilizer, type Sample } from './stabilizer';
 
 /** A pen going straight at `speed` px/s, reported at `hz`; returns the smoothed positions with their times. */
-function run(stabilization: number, hz: number, speed: number, seconds: number, extra: { zoom?: number; bySpeed?: boolean } = {}): { t: number; s: Sample; x: number }[] {
+function run(stabilization: number, hz: number, speed: number, seconds: number, extra: { scale?: number; bySpeed?: boolean } = {}): { t: number; s: Sample; x: number }[] {
   const st = new Stabilizer({ stabilization, ...extra });
   const out: { t: number; s: Sample; x: number }[] = [];
   const dt = 1000 / hz;

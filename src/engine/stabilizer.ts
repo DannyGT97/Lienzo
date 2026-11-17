@@ -7,20 +7,6 @@
  * late and brings several samples at once) leaves the same trail in time as one that reports 60 times a second.
  */
 
-/**
- * The stabilization to use at a view scale. Smoothing each sample towards the pen leaves the
- * stroke trailing it by `s / (1 - s)` samples. A sample is a fixed distance of hand movement, i.e. of screen, so that
- * lag is already the same on screen at every zoom; dividing it by the scale (done here, only on request) makes it
- * shrink when zoomed in (detail work follows the pen closely) and grow when zoomed out, up to 4x either way.
- * Scale 1, or no scale, leaves the setting as it is.
- */
-export function stabilizationAtZoom(stabilization: number, scale?: number): number {
-  const s = Math.min(0.95, Math.max(0, stabilization));
-  if (!scale || !Number.isFinite(scale)) return s;
-  const lag = s / (1 - s) / Math.min(4, Math.max(0.25, scale));
-  return lag / (1 + lag);
-}
-
 /** Screen pixels per pen sample at which the speed-dependent stabilization has eased off to half its lag. */
 export const STAB_SPEED_HALF = 14;
 
@@ -44,8 +30,8 @@ const MAX_DT_MS = 100;
 
 export interface StabilizerSettings {
   stabilization: number;
-  /** View scale when the stroke starts; set only when the lag should follow the zoom (see `stabilizationAtZoom`). */
-  zoom?: number;
+  /** View scale (screen pixels per page pixel) when the stroke starts, to measure the pen's speed on screen (1 when absent). */
+  scale?: number;
   /** Ease the lag off as the pen speeds up (see `stabilizationAtSpeed`). */
   bySpeed?: boolean;
   /** Screen pixels per sample at which the speed-dependent lag has halved (`STAB_SPEED_HALF` when absent). */
@@ -77,10 +63,10 @@ export class Stabilizer {
     this.prev = { x, y, t };
     // How many sample intervals this step covers: 1 without times, so the filter is per sample as it always was.
     const steps = prev && t !== undefined && prev.t !== undefined ? Math.min(MAX_DT_MS, Math.max(MIN_DT_MS, t - prev.t)) / STAB_SAMPLE_MS : 1;
-    let stab = stabilizationAtZoom(this.s.stabilization, this.s.zoom);
+    let stab = Math.min(0.95, Math.max(0, this.s.stabilization));
     if (this.s.bySpeed) {
-      // Raw samples jitter, so the speed is itself smoothed; it is measured on screen like the zoom's lag, per sample interval.
-      const scale = this.s.zoom && Number.isFinite(this.s.zoom) ? this.s.zoom : 1;
+      // Raw samples jitter, so the speed is itself smoothed; it is measured on screen, per sample interval.
+      const scale = this.s.scale && Number.isFinite(this.s.scale) ? this.s.scale : 1;
       const step = prev ? (Math.hypot(x - prev.x, y - prev.y) * scale) / steps : 0;
       this.speed += (step - this.speed) * (1 - Math.pow(0.5, steps));
       stab = stabilizationAtSpeed(stab, this.speed, this.s.speedHalf);

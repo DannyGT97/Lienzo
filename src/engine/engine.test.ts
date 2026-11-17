@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { BLEND_MODES, blendColor } from './blend';
-import { DEFAULT_ANTIALIAS, STAB_SPEED_HALF, Stroke, antialiasOf, defaultBrush, entryRampSamples, innerRadius, stabilizationAtSpeed, stabilizationAtZoom } from './brush';
+import { DEFAULT_ANTIALIAS, STAB_SPEED_HALF, Stroke, antialiasOf, defaultBrush, entryRampSamples, innerRadius, stabilizationAtSpeed } from './brush';
 import { compositePixel, flatten, flattenRegion, sampleDocument, thumbnail } from './composite';
 import { addLayer, activeLayer, createDocument, documentPixels, paintTarget } from './document';
 import { History, applyLimits, limitsNotice, patchCommand } from './history';
@@ -554,26 +554,6 @@ describe('brush on tiles', () => {
     expect(limitsNotice({ forgotten: 0, affected: 0 })).toBeNull();
     expect(limitsNotice({ forgotten: 1, affected: 1 })).toBe('Se olvidó 1 paso antiguo del historial de 1 documento por los nuevos límites; ya no se pueden deshacer.');
     expect(limitsNotice({ forgotten: 6, affected: 2 })).toContain('6 pasos antiguos del historial de 2 documentos');
-  });
-});
-
-describe('stabilization by zoom', () => {
-  it('is unchanged at scale 1 and without a scale', () => {
-    expect(stabilizationAtZoom(0.4)).toBeCloseTo(0.4);
-    expect(stabilizationAtZoom(0.4, 1)).toBeCloseTo(0.4);
-    expect(stabilizationAtZoom(0, 3)).toBe(0);
-  });
-
-  it('eases off zoomed in and firms up zoomed out, within bounds', () => {
-    expect(stabilizationAtZoom(0.5, 2)).toBeLessThan(0.5);
-    expect(stabilizationAtZoom(0.5, 0.5)).toBeGreaterThan(0.5);
-    expect(stabilizationAtZoom(0.95, 0.01)).toBeLessThan(1);
-    expect(stabilizationAtZoom(0.5, 100)).toBeGreaterThan(0);
-  });
-
-  it('keeps the on-screen lag constant: lag s/(1-s) times scale', () => {
-    const lag = (s: number) => s / (1 - s);
-    expect(lag(stabilizationAtZoom(0.6, 2)) * 2).toBeCloseTo(lag(0.6));
   });
 });
 

@@ -4,6 +4,7 @@
 // code that reads it); a setting the engine does not apply must not be listed here.
 
 import { antialiasOf, type BrushSettings } from './brush';
+import { correctionOf } from './stroke-correct';
 
 /** Which engine a tool paints with. Only the settings that engine reads are offered. */
 export type ToolFamily = 'stroke' | 'blend' | 'none';
@@ -122,6 +123,12 @@ export const BRUSH_PARAMS: readonly BrushParam[] = [
   },
   // Trazo
   { key: 'stabilization', kind: 'number', category: 'stroke', label: 'Estabilización', families: STROKE, hint: 'Suaviza el temblor de la mano', get: (s) => Math.round(s.stabilization * 100), set: (v) => ({ stabilization: v / 100 }), min: 0, max: 95, step: 1, unit: '', decimals: 0 },
+  {
+    key: 'correction', kind: 'choice', category: 'stroke', label: 'Corrección del trazo', families: STROKE,
+    hint: 'Al levantar el lápiz alisa el trazo entero (curvas y rectas) sin moverlo de sitio; las esquinas se conservan. Más fuerte = más limpio',
+    options: [{ value: 0, label: 'Nada' }, { value: 1, label: 'Débil' }, { value: 2, label: 'Medio' }, { value: 3, label: 'Fuerte' }],
+    get: (s) => correctionOf(s.correction), set: (v) => ({ correction: correctionOf(v) }),
+  },
   { key: 'taperIn', kind: 'number', category: 'stroke', label: 'Entrada (afinado)', families: STROKE, hint: 'Longitud en la que el trazo crece hasta su tamaño', get: (s) => Math.round(orZero(s.taperIn)), set: (v) => ({ taperIn: v }), min: 0, max: 400, step: 1, unit: 'px', decimals: 0, length: true },
   { key: 'taperOut', kind: 'number', category: 'stroke', label: 'Salida (afinado)', families: STROKE, hint: 'Longitud en la que el trazo se afina al levantar el lápiz', get: (s) => Math.round(orZero(s.taperOut)), set: (v) => ({ taperOut: v }), min: 0, max: 400, step: 1, unit: 'px', decimals: 0, length: true },
   // Textura

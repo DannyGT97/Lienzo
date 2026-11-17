@@ -26,7 +26,7 @@ export interface VectorStroke {
 
 /** The brush as a vector stroke keeps it: nothing that depends on how the pen moved at the time. */
 export function vectorBrush(b: BrushSettings): BrushSettings {
-  const { stabilizationZoom: _z, stabilizationBySpeed: _s, entryRamp: _e, ...rest } = b;
+  const { stabilizationBySpeed: _s, correction: _c, viewScale: _k, entryRamp: _e, ...rest } = b;
   return { ...rest, erase: false, stabilization: 0 };
 }
 

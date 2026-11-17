@@ -23,6 +23,7 @@ import { BLEND_MODES, type BlendMode } from '../engine/blend';
 import type { GradientRepeat, GradientShape } from '../engine/gradient';
 import { presetStops } from '../engine/gradient-presets';
 import { averageBox } from '../engine/eyedropper';
+import { correctionOf, DEFAULT_CORRECTION } from '../engine/stroke-correct';
 import { DEFAULT_ANTIALIAS, Stroke, antialiasOf, defaultBrush, entryRampSamples, type BrushSettings, type PenStroke, type Rect } from '../engine/brush';
 import { LiquifyStroke, type LiquifyMode } from '../engine/liquify';
 import { SmudgeStroke } from '../engine/smudge';
@@ -508,7 +509,7 @@ function setTool(next: Tool): void {
 }
 
 // ---- brush settings ---------------------------------------------------------
-const brush: BrushSettings = { ...defaultBrush };
+const brush: BrushSettings = { ...defaultBrush, correction: DEFAULT_CORRECTION };
 
 // Each sub tool keeps what the person changed on it. Only the differences from its preset are stored (so an untouched
 // setting keeps following the preset); see engine/brush-overrides.ts.
@@ -709,6 +710,15 @@ function setAntialias(level: number): void {
   brush.antialias = antialiasOf(level);
   select('antialias').value = String(brush.antialias);
 }
+/** The stroke correction level of the brush, kept in step with the select of the flat panel. */
+function setCorrection(level: number): void {
+  brush.correction = correctionOf(level);
+  select('correction').value = String(brush.correction);
+}
+select('correction').addEventListener('change', () => {
+  brush.correction = correctionOf(Number(select('correction').value));
+  brushEdited();
+});
 select('antialias').addEventListener('change', () => {
   brush.antialias = antialiasOf(Number(select('antialias').value));
   brushEdited();
@@ -725,6 +735,11 @@ function setBrushParam(key: string, shown: number | boolean, preview = true): vo
   const p = paramByKey(key);
   if (key === 'antialias' && p?.kind === 'choice') {
     setAntialias(p.get(Object.assign({}, brush, p.set(shown))));
+    brushEdited();
+    return;
+  }
+  if (key === 'correction' && p?.kind === 'choice') {
+    setCorrection(shown);
     brushEdited();
     return;
   }
@@ -1123,7 +1138,10 @@ function touchUp(e: PointerEvent): boolean {
   if (touches.size === 0) {
     const g = gesture;
     gesture = null;
-    if (!g.moved && performance.now() - g.t0 < 350) {
+    // While something is being edited with Apply / Cancel (a transformation, a filter, the canvas size…) a quick tap of two or
+    // three fingers is not an undo: undoing would cancel it. Only its Cancel button, or Esc, ends it.
+    const editing = transformUi.active || filtersUi.active || adjustUi.active || canvasResize.active;
+    if (!editing && !g.moved && performance.now() - g.t0 < 350) {
       if (g.maxFingers === 2) undoRedo(false);
       else if (g.maxFingers >= 3) undoRedo(true);
     }
@@ -1521,7 +1539,7 @@ function startStroke(e: PointerEvent, p: Pt): void {
       ? new LiquifyStroke(target, brush, select('liq-mode').value as LiquifyMode, selUi.current ?? undefined)
       : blending
       ? new SmudgeStroke(target, brush, tool === 'blur' ? 'blur' : 'finger', selUi.current ?? undefined)
-      : new Stroke(target, { ...brush, erase: tool === 'erase' || transparentColor, stabilizationZoom: stabByZoom ? view.scale : undefined, stabilizationBySpeed: stabBySpeed, entryRamp: e.pointerType === 'pen' && prefs.usePressure ? entryRampSamples(brush.stabilization) : 0 }, selUi.current ?? undefined);
+      : new Stroke(target, { ...brush, erase: tool === 'erase' || transparentColor, stabilizationBySpeed: true, viewScale: view.scale, entryRamp: e.pointerType === 'pen' && prefs.usePressure ? entryRampSamples(brush.stabilization) : 0 }, selUi.current ?? undefined);
   // Rulers: the stroke may follow a line or a ray, and be repeated mirrored across symmetry axes.
   const rs = rulersUi.forStroke(p);
   const s: PenStroke = rs
@@ -3337,19 +3355,6 @@ input('predict').addEventListener('change', (e) => {
   predict = (e.target as HTMLInputElement).checked;
   drawOverlay();
 });
-/** Off by default: the smoothing already lags the same distance on screen at any zoom; on, it eases off when zoomed in and grows when zoomed out (see `stabilizationAtZoom`). */
-let stabByZoom = false;
-input('stabzoom').addEventListener('change', (e) => {
-  stabByZoom = (e.target as HTMLInputElement).checked;
-});
-/**
- * The stabilization setting becomes a ceiling that a quick stroke eases off (see `stabilizationAtSpeed`). On by default: measured on a
- * tablet pen, without it a stabilization of 0.6 left the line 13 px behind the pen on average (52 px in quick strokes).
- */
-let stabBySpeed = true;
-input('stabspeed').addEventListener('change', (e) => {
-  stabBySpeed = (e.target as HTMLInputElement).checked;
-});
 input('finger-draws').addEventListener('change', (e) => {
   fingerDraws = (e.target as HTMLInputElement).checked;
 });
@@ -3387,6 +3392,7 @@ function applyPreset(p: BrushPreset): void {
   if (p.stabilization !== undefined) setSlider('stab', Math.round(p.stabilization * 100));
   brush.behind = !!p.behind;
   setAntialias(p.antialias ?? DEFAULT_ANTIALIAS);
+  setCorrection(DEFAULT_CORRECTION);
   brush.spacing = defaultBrush.spacing; // no preset sets it: a stamp spacing chosen for the last brush does not follow
   // Character of the brush: what a preset does not mention goes back to plain.
   brush.pressureGraph = p.pressureGraph;
