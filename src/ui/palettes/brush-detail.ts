@@ -24,7 +24,7 @@ export interface BrushDetailDeps {
   set: (key: string, shown: number | boolean) => void;
   /** The sub tool these settings belong to and which of them the person changed from its preset; null when they belong to none. */
   subTool: () => { name: string; modified: ReadonlySet<string> } | null;
-  /** Put one changed setting, or all of them (no key), back to what the preset gives. */
+  /** Put one changed setting, or all of them (no key: the app asks for confirmation first), back to what the preset gives. */
   restore: (key?: string) => void;
 }
 
@@ -72,8 +72,7 @@ export function brushDetailPalette(d: BrushDetailDeps): PaletteBuilder {
     const restoreAll = document.createElement('button');
     restoreAll.type = 'button';
     restoreAll.className = 'bd-restore';
-    restoreAll.textContent = 'Restaurar preset';
-    restoreAll.title = 'Devuelve todos los ajustes de esta subherramienta a como vienen de serie';
+    restoreAll.textContent = 'Valores por defecto';
     restoreAll.addEventListener('click', () => d.restore());
     head.append(title, restoreAll);
     const intro = document.createElement('p');
@@ -242,7 +241,9 @@ export function brushDetailPalette(d: BrushDetailDeps): PaletteBuilder {
       head.hidden = family === 'none';
       title.textContent = sub ? sub.name : 'Ajustes actuales';
       title.title = sub ? 'Los cambios se guardan en esta subherramienta' : 'Esta herramienta no guarda sus ajustes aparte';
-      restoreAll.hidden = !sub || sub.modified.size === 0;
+      restoreAll.hidden = !sub; // always shown for a sub tool; it works once something was changed
+      restoreAll.disabled = !sub || sub.modified.size === 0;
+      restoreAll.title = restoreAll.disabled ? 'Esta subherramienta ya está con sus valores por defecto' : 'Devuelve todos los ajustes de esta subherramienta a sus valores por defecto';
       for (const row of rows) {
         const shown = offered.has(row.param);
         row.el.hidden = !shown;

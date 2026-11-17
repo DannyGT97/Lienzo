@@ -2,6 +2,7 @@ import type { AdjustSettings } from './adjust';
 import type { VectorStroke } from './vector';
 import type { BlendMode } from './blend';
 import { createDocument, newLayer, type Document, type Layer, type LayerKind, type LayerRole } from './document';
+import { deflateRaw, inflateRaw } from './deflate-pool';
 import type { Guides } from './guides';
 import type { LayerComp } from './layer-comps';
 import type { Ruler } from './rulers';
@@ -92,21 +93,9 @@ interface Metadata {
  */
 const PARALLEL = 16;
 
-async function pack(data: Uint8ClampedArray): Promise<Uint8Array> {
-  const stream = new CompressionStream('deflate-raw');
-  const writer = stream.writable.getWriter();
-  void writer.write(data);
-  void writer.close();
-  return new Uint8Array(await new Response(stream.readable).arrayBuffer());
-}
-
-async function unpack(data: ArrayBuffer): Promise<Uint8Array> {
-  const stream = new DecompressionStream('deflate-raw');
-  const writer = stream.writable.getWriter();
-  void writer.write(new Uint8Array(data));
-  void writer.close();
-  return new Uint8Array(await new Response(stream.readable).arrayBuffer());
-}
+// Both run on Web Workers (see deflate-pool): the platform's streams compress on the calling thread, which froze the window while saving.
+const pack = (data: Uint8ClampedArray): Promise<Uint8Array> => deflateRaw(data);
+const unpack = (data: ArrayBuffer): Promise<Uint8Array> => inflateRaw(new Uint8Array(data));
 
 /** Write a document to a `.lienzo` file. */
 export interface SaveOptions {

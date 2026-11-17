@@ -1,3 +1,4 @@
+import './settings-boot'; // first: puts the saved settings back into localStorage before anything reads it
 import {
   createBalloon,
   defaultTailStyle,
@@ -106,6 +107,7 @@ import { libraryFs } from './library-fs';
 import { createPreviewer, createThumbs, previewPng } from './library-preview';
 import { joinRel, uniqueName } from './library';
 import { createSaveFlow } from './save-flow';
+import { flushSettings } from './settings-store';
 import { deniedNotice, failedNotice, savedNotice, type NoticeText, type SaveStep, type SavedResult } from './save-notice';
 import { formatInfo, formatOfName, formatsFor, isLayered, type SaveFormat, type SaveKind } from './save-formats';
 import { createFiltersUi } from './filters-ui';
@@ -600,7 +602,23 @@ function applyOptionControls(binding: LiveBinding, subId: string): void {
 function refreshResetButton(): void {
   const sub = toolPalettes?.current().subId;
   const changed = !!sub && (Object.keys(overrides[sub] ?? {}).length > 0 || Object.keys(optionStore[sub] ?? {}).length > 0);
-  $('subtool-reset').hidden = !changed;
+  const button = $('subtool-reset') as HTMLButtonElement;
+  button.hidden = !sub; // always there for any sub tool; it only works once something was changed
+  button.disabled = !changed;
+  button.title = changed ? 'Devuelve esta subherramienta a sus valores por defecto' : 'Esta subherramienta ya está con sus valores por defecto';
+}
+/** The name the person sees for a sub tool. */
+function subToolName(subId: string): string {
+  const cur = toolPalettes?.current();
+  const sub = PALETTE_TOOLS.find((t) => t.id === cur?.toolId)?.groups.flatMap((g) => g.subtools).find((s) => s.id === subId);
+  return sub?.es ?? subId;
+}
+/** The button asks first: one stray click must not throw away what the person tuned. */
+async function askResetSubTool(): Promise<void> {
+  const sub = toolPalettes?.current().subId;
+  if (!sub) return;
+  const ok = await confirmDialog(`¿Devolver «${subToolName(sub)}» a sus valores por defecto? Se perderán los cambios que hayas hecho en sus ajustes.`, 'Restaurar', 'Cancelar');
+  if (ok && toolPalettes?.current().subId === sub) resetSubTool();
 }
 /** Put the chosen sub tool back to how it ships: its preset and its option panel. */
 function resetSubTool(): void {
@@ -617,7 +635,7 @@ function resetSubTool(): void {
 }
 $('tooloption-body').addEventListener('input', optionEdited);
 $('tooloption-body').addEventListener('change', optionEdited);
-$('subtool-reset').addEventListener('click', resetSubTool);
+$('subtool-reset').addEventListener('click', () => void askResetSubTool());
 /** Run `fn` as a change that is not an edit by the person (a preset, restored settings), then show the result once. */
 function asApplied(fn: () => void): void {
   applying = true;
@@ -4098,7 +4116,10 @@ commands.register('helpupdates', () =>
     },
     find: findUpdate,
     window: openUpdatesWindow,
-    beforeInstall: () => autosave.flush(),
+    beforeInstall: async () => {
+      await autosave.flush();
+      await flushSettings(); // the installer closes the app at once: the settings file must be up to date by then
+    },
   }),
 );
 commands.register('pagechangecanvassize', () => {
@@ -4285,7 +4306,7 @@ for (const id of RIGHT_GROUPS.flat()) {
 }
 leftExtra = mountLeftExtraDock(
   $('dock-left-extra'),
-  { size: () => brush.size, setSize: (px) => setBrushSize(px, true), detail: { tool: () => tool, settings: () => brush, set: (key, shown) => setBrushParam(key, shown), subTool: subToolState, restore: restoreSubTool } },
+  { size: () => brush.size, setSize: (px) => setBrushSize(px, true), detail: { tool: () => tool, settings: () => brush, set: (key, shown) => setBrushParam(key, shown), subTool: subToolState, restore: (key) => (key === undefined ? void askResetSubTool() : restoreSubTool(key)) } },
   () => {
     commands.notify();
     persistShown();

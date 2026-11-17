@@ -1,6 +1,7 @@
 use tauri::plugin::{Builder as PluginBuilder, TauriPlugin};
 
 mod library;
+mod settings;
 mod update;
 
 /// The Android side of the document picker (`DocPickerPlugin.kt`): opens a file with a write grant that survives restarts.
@@ -227,7 +228,7 @@ pub fn run() {
   builder
     .plugin(tauri_plugin_dialog::init())
     .plugin(doc_picker())
-    .invoke_handler(tauri::generate_handler![build_info, pick_document, pick_documents, create_document, write_document, android_update_check, android_update_install, library::library_info, library::library_list, library::library_mkdir, library::library_move, library::library_copy, library::library_remove, library::library_read, library::library_read_range, library::library_write, library::library_reveal, library::library_request_access])
+    .invoke_handler(tauri::generate_handler![build_info, pick_document, pick_documents, create_document, write_document, android_update_check, android_update_install, library::library_info, library::library_list, library::library_mkdir, library::library_move, library::library_copy, library::library_remove, library::library_read, library::library_read_range, library::library_write, library::library_reveal, library::library_request_access, settings::settings_read, settings::settings_write])
     .plugin(tauri_plugin_fs::init())
     .setup(|app| {
       if cfg!(debug_assertions) {

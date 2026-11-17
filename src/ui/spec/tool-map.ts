@@ -69,17 +69,20 @@ const blend = (tool: 'blur' | 'smudge' | 'clone', p: BrushPreset): LiveBinding =
 /** Real G-pen: it takes a firm press to reach full width. */
 const REAL_G_PEN_PRESSURE: PressureGraph = [[0, 0], [0.75, 0.25], [1, 1]];
 
-/** Sub tool id -> engine binding. Presets are first approximations built on the one round brush we have. */
+/**
+ * Sub tool id -> engine binding. Presets are first approximations built on the one round brush we have.
+ * Opacity is 1 unless the tool itself is a thin medium (spray, noise, kneaded eraser, blenders: their opacity is their strength).
+ */
 export const LIVE: Record<string, LiveBinding> = {
   // Pressure floors and curves below were tuned by hand; the pens do not taper by themselves and stabilize lightly (5-6 of 100).
-  'pen.pen.g-pen': pen({ size: 8, hardness: 1, opacity: 0.9, pressureOpacity: 0.2, stabilization: 0.1, pressureSize: true, minSize: 0.1 }),
+  'pen.pen.g-pen': pen({ size: 8, hardness: 1, opacity: 1, stabilization: 0.1, pressureSize: true, minSize: 0.1 }),
   'pen.pen.real-g-pen': pen({ size: 9, hardness: 1, opacity: 1, stabilization: 0.12, pressureSize: true, pressureGraph: REAL_G_PEN_PRESSURE, nibThickness: 0.85 }),
   'pen.pen.milli-pen': pen({ size: 3, hardness: 1, opacity: 1, stabilization: 0.3, pressureSize: false }),
   'pen.pen.felt-pen': pen({ size: 14, hardness: 0.7, opacity: 1, stabilization: 0.2, pressureSize: false }),
   'pen.pen.dot-pen': pen({ size: 2, hardness: 1, opacity: 1, stabilization: 0.5, pressureSize: false }),
-  'sketch.sketch.pencil': pen({ size: 5, hardness: 1, opacity: 0.9, pressureOpacity: 0.2, stabilization: 0.15, pressureSize: true, minSize: 0.1, grain: 0.55, grainScale: 2, flow: 0.85, pressureFlow: 0.5 }),
-  'sketch.sketch.mechanical-pencil': pen({ size: 2, hardness: 0.8, opacity: 0.9, stabilization: 0.15, pressureSize: false }),
-  'airbrush.airbrush.soft': pen({ size: 40, hardness: 0, opacity: 0.9, stabilization: 0.1, pressureSize: false, flow: 0.5 }),
+  'sketch.sketch.pencil': pen({ size: 5, hardness: 1, opacity: 1, stabilization: 0.15, pressureSize: true, minSize: 0.1, grain: 0.55, grainScale: 2, flow: 0.85, pressureFlow: 0.3 }),
+  'sketch.sketch.mechanical-pencil': pen({ size: 2, hardness: 0.8, opacity: 1, stabilization: 0.15, pressureSize: false }),
+  'airbrush.airbrush.soft': pen({ size: 40, hardness: 0, opacity: 1, stabilization: 0.1, pressureSize: false, flow: 0.5 }),
   // More pens and brushes, as first approximations built on the one round brush with grain, taper and curve.
   'pen.pen.mapping-pen': pen({ size: 2, hardness: 1, opacity: 1, stabilization: 0.4, pressureSize: false }),
   'pen.pen.turnip-pen': pen({ size: 7, hardness: 0.9, opacity: 1, stabilization: 0.3, pressureSize: true, taperIn: 10, taperOut: 40 }),
@@ -87,18 +90,18 @@ export const LIVE: Record<string, LiveBinding> = {
   'pen.pen.rough-pen': pen({ size: 9, hardness: 1, opacity: 1, stabilization: 0.12, pressureSize: true, nibThickness: 1.5, grain: 0.7, grainScale: 1.5 }),
   'pen.pen.calligraphy': pen({ size: 10, hardness: 1, opacity: 1, stabilization: 0.35, pressureSize: true, minSize: 0.15, pressureCurve: 1.3 }),
   'pen.pen.flat-marker': pen({ size: 22, hardness: 0.7, opacity: 1, stabilization: 0.25, pressureSize: true, minSize: 0.6, pressureGraph: [[0, 0], [0.56, 0.06], [0.93, 0.6], [1, 1]], nibThickness: 0.3, nibAngle: 90 }),
-  'sketch.sketch.charcoal': pen({ size: 16, hardness: 0.35, opacity: 0.9, stabilization: 0.1, pressureSize: true, grain: 0.75, grainScale: 3 }),
-  'sketch.sketch.crayon': pen({ size: 10, hardness: 0.6, opacity: 0.9, stabilization: 0.1, pressureSize: true, grain: 0.6, grainScale: 2 }),
-  'sketch.sketch.pastel': pen({ size: 18, hardness: 0.4, opacity: 0.85, stabilization: 0.1, pressureSize: true, grain: 0.8, grainScale: 3 }),
+  'sketch.sketch.charcoal': pen({ size: 16, hardness: 0.35, opacity: 1, stabilization: 0.1, pressureSize: true, grain: 0.75, grainScale: 3 }),
+  'sketch.sketch.crayon': pen({ size: 10, hardness: 0.6, opacity: 1, stabilization: 0.1, pressureSize: true, grain: 0.6, grainScale: 2 }),
+  'sketch.sketch.pastel': pen({ size: 18, hardness: 0.4, opacity: 1, stabilization: 0.1, pressureSize: true, grain: 0.8, grainScale: 3 }),
   'sketch.sketch.chalk': pen({ size: 14, hardness: 0.81, opacity: 1, stabilization: 0.1, pressureSize: true, minSize: 0.5, pressureGraph: [[0, 0], [0.14, 0.69], [0.75, 1], [1, 1]], nibThickness: 0.5, grain: 0.85, grainScale: 2, pressureFlow: 0.5 }),
   'airbrush.airbrush.spray': pen({ size: 50, hardness: 0, opacity: 0.4, stabilization: 0.05, pressureSize: false, grain: 0.7, grainScale: 1.5 }),
-  'airbrush.airbrush.droplet': pen({ size: 30, hardness: 0.6, opacity: 0.9, stabilization: 0.05, pressureSize: false, grain: 0.92, grainScale: 1.5 }),
+  'airbrush.airbrush.droplet': pen({ size: 30, hardness: 0.6, opacity: 1, stabilization: 0.05, pressureSize: false, grain: 0.92, grainScale: 1.5 }),
   'airbrush.airbrush.noise': pen({ size: 40, hardness: 0.1, opacity: 0.6, stabilization: 0.05, pressureSize: false, grain: 0.75, grainScale: 1 }),
-  'brush.watercolor.round-watercolor-brush': pen({ size: 30, hardness: 1, opacity: 0.9, stabilization: 0.2, pressureSize: true, pressureOpacity: 0.2, flow: 0.5 }),
+  'brush.watercolor.round-watercolor-brush': pen({ size: 30, hardness: 1, opacity: 1, stabilization: 0.2, pressureSize: true, pressureOpacity: 0.2, flow: 0.5 }),
   'brush.watercolor.brush-pen': pen({ size: 14, hardness: 0.9, opacity: 1, stabilization: 0.3, pressureSize: true, taperIn: 8, taperOut: 30 }),
   'brush.watercolor.dry-ink': pen({ size: 12, hardness: 1, opacity: 1, stabilization: 0.25, pressureSize: true, minSize: 0.05, pressureGraph: [[0, 0], [0.74, 0.25], [1, 1]], grain: 0.55, grainScale: 2 }),
   'brush.thick-paint.gouache': pen({ size: 26, hardness: 1, opacity: 1, stabilization: 0.2, pressureSize: true, minSize: 0.1, pressureGraph: [[0, 0], [0.31, 0.21], [0.58, 0.82], [1, 1]], flow: 0.75, pressureFlow: 0.8 }),
-  'brush.thick-paint.oil-paint': pen({ size: 28, hardness: 0.7, opacity: 0.95, stabilization: 0.2, pressureSize: true, grain: 0.15, grainScale: 3 }),
+  'brush.thick-paint.oil-paint': pen({ size: 28, hardness: 0.7, opacity: 1, stabilization: 0.2, pressureSize: true, grain: 0.15, grainScale: 3 }),
   'eraser.eraser.kneaded-eraser': eraser({ size: 24, hardness: 0.2, opacity: 0.5, stabilization: 0.1, pressureSize: false }),
   'eraser.eraser.rough': eraser({ size: 16, hardness: 0.8, opacity: 1, stabilization: 0.1, pressureSize: false, grain: 0.6, grainScale: 2 }),
   'blend.blend.blend': blend('smudge', { size: 30, hardness: 0.5, opacity: 0.6, stabilization: 0.1, pressureSize: false }),
