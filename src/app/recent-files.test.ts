@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { FileRef } from './file-io';
-import { mergeRecent, parseRecent, sameFile, withoutRecent, type RecentFile } from './recent-files';
+import { mergeRecent, parseRecent, relocateRecent, sameFile, withoutRecent, type RecentFile } from './recent-files';
 
 const file = (path: string): FileRef => ({ kind: 'tauri', path, name: path.split('/').pop()! });
 const item = (path: string): RecentFile => ({ ref: file(path), name: file(path).name });
@@ -36,5 +36,24 @@ describe('recent files', () => {
     expect(parseRecent([good, null, 7, { ref: { kind: 'tauri', name: 'no path' } }, { ref: { kind: 'browser', name: 'no handle' } }, { ref: { kind: 'other', name: 'x' } }])).toEqual([good]);
     expect(parseRecent('nope')).toEqual([]);
     expect(parseRecent(undefined)).toEqual([]);
+  });
+});
+
+describe('library files in the recent list', () => {
+  const lib = (rel: string): RecentFile => ({ ref: { kind: 'library', rel, name: rel.slice(rel.lastIndexOf('/') + 1) }, name: rel.slice(rel.lastIndexOf('/') + 1) });
+  const outside: RecentFile = { ref: { kind: 'tauri', path: 'C:/x/a.psd', name: 'a.psd' }, name: 'a.psd' };
+
+  it('compares and keeps them', async () => {
+    expect(await sameFile(lib('a/b.lienzo').ref, lib('a/b.lienzo').ref)).toBe(true);
+    expect(await sameFile(lib('a/b.lienzo').ref, lib('a/c.lienzo').ref)).toBe(false);
+    expect(parseRecent([lib('a/b.lienzo'), { ref: { kind: 'library', name: 'sin ruta' } }])).toEqual([lib('a/b.lienzo')]);
+  });
+
+  it('follows a rename or a move and drops what was deleted', () => {
+    const list = [lib('a/b.lienzo'), outside, lib('a/c/d.lienzo'), lib('ab.lienzo')];
+    expect(relocateRecent(list, 'a/b.lienzo', 'a/nuevo.lienzo').map((r) => r.ref.kind === 'library' && r.ref.rel)).toEqual(['a/nuevo.lienzo', false, 'a/c/d.lienzo', 'ab.lienzo']);
+    expect(relocateRecent(list, 'a/b.lienzo', 'a/nuevo.lienzo')[0]!.name).toBe('nuevo.lienzo');
+    expect(relocateRecent(list, 'a', 'z').map((r) => r.ref.kind === 'library' && r.ref.rel)).toEqual(['z/b.lienzo', false, 'z/c/d.lienzo', 'ab.lienzo']);
+    expect(relocateRecent(list, 'a', null)).toEqual([outside, lib('ab.lienzo')]);
   });
 });

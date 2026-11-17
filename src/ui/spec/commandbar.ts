@@ -9,7 +9,7 @@ export interface BarItem {
 export const COMMAND_BAR: BarItem[][] = [
   [
     { id: 'applicationtilingmenu', icon: 'menu', tip: 'Mostrar el menú de la aplicación' },
-    { id: 'filebootclipstudio', icon: 'home', tip: 'Inicio' },
+    { id: 'filehome', icon: 'home', tip: 'Inicio: explorador de archivos' },
   ],
   [
     { id: 'filenew', icon: 'new', tip: 'Nuevo (Ctrl+N)' },

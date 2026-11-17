@@ -10,7 +10,18 @@ export interface FileFilter {
 }
 
 /** Where a document came from or was saved to, so "Save" can write to the same place again. */
-export type FileRef = { kind: 'tauri'; path: string; name: string } | { kind: 'browser'; handle: FileSystemFileHandle; name: string };
+export type FileRef =
+  | { kind: 'tauri'; path: string; name: string }
+  | { kind: 'browser'; handle: FileSystemFileHandle; name: string }
+  /** A file of the app's own library (library.ts): `rel` is its path inside the library folder. */
+  | { kind: 'library'; rel: string; name: string };
+
+async function library() {
+  const { libraryFs } = await import('./library-fs');
+  const fs = libraryFs();
+  if (!fs) throw new Error('La biblioteca no está disponible en este navegador.');
+  return fs;
+}
 
 export const isApp = (): boolean => typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
 
@@ -172,6 +183,10 @@ async function writeOnAndroid(path: string, blob: Blob): Promise<void> {
 
 /** Write to a place a document was saved to or opened from before. */
 export async function saveTo(ref: FileRef, blob: Blob): Promise<void> {
+  if (ref.kind === 'library') {
+    await (await library()).write(ref.rel, blob);
+    return;
+  }
   if (ref.kind === 'tauri') {
     try {
       if (onAndroid()) await writeOnAndroid(ref.path, blob);
@@ -207,6 +222,7 @@ export async function readKnownFile(ref: FileRef): Promise<Blob> {
 
 /** Read again the file a document was saved to or opened from. */
 export async function readFrom(ref: FileRef): Promise<Blob> {
+  if (ref.kind === 'library') return (await library()).read(ref.rel);
   if (ref.kind === 'tauri') {
     const { readFile } = await import('@tauri-apps/plugin-fs');
     return new Blob([(await readFile(ref.path)) as BlobPart]);
@@ -220,6 +236,12 @@ export async function readFrom(ref: FileRef): Promise<Blob> {
  */
 export async function modifiedAt(ref: FileRef): Promise<number | null> {
   try {
+    if (ref.kind === 'library') {
+      const fs = await library();
+      const rel = ref.rel;
+      const dir = rel.includes('/') ? rel.slice(0, rel.lastIndexOf('/')) : '';
+      return (await fs.list(dir)).find((e) => e.rel === rel)?.modified || null;
+    }
     if (ref.kind === 'tauri') {
       const { stat } = await import('@tauri-apps/plugin-fs');
       return (await stat(ref.path)).mtime?.getTime() ?? null;
@@ -270,4 +292,39 @@ export async function openFile(filters: FileFilter[]): Promise<{ ref: FileRef | 
     }
   }
   return null; // the caller falls back to its own file input
+}
+
+/**
+ * Let the person choose several files at once, to copy them somewhere (the library); the bytes of each are read right away.
+ * Null when cancelled, and also when there is no picker that allows several (the caller then uses a file input).
+ */
+export async function openFiles(filters: FileFilter[]): Promise<{ blob: Blob; name: string }[] | null> {
+  if (isApp()) {
+    const { readFile } = await import('@tauri-apps/plugin-fs');
+    let paths: string[];
+    if (onAndroid()) {
+      const { invoke } = await import('@tauri-apps/api/core');
+      paths = await invoke<string[]>('pick_documents', { extensions: filters.flatMap((f) => f.extensions) });
+    } else {
+      const { open } = await import('@tauri-apps/plugin-dialog');
+      const picked = await open({ multiple: true, directory: false, filters });
+      paths = Array.isArray(picked) ? picked : picked ? [picked] : [];
+    }
+    if (!paths.length) return null;
+    const out: { blob: Blob; name: string }[] = [];
+    for (const path of paths) out.push({ blob: new Blob([(await readFile(path)) as BlobPart]), name: await displayName(path) });
+    return out;
+  }
+  const w = window as PickerWindow;
+  if (w.showOpenFilePicker) {
+    try {
+      const handles = await w.showOpenFilePicker({ types: pickerTypes(filters), multiple: true });
+      if (!handles.length) return null;
+      return await Promise.all(handles.map(async (h) => ({ blob: await h.getFile(), name: h.name })));
+    } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') return null;
+      throw err;
+    }
+  }
+  return null;
 }

@@ -11,6 +11,8 @@ export interface NewDocSpec {
   /** Colour of the paper layer; null = no paper (the page starts transparent). */
   paper: [number, number, number] | null;
   guides: Guides;
+  /** The file type chosen, when the dialog was asked to offer a choice (a document made inside the library). */
+  format?: string;
 }
 
 /** Print sizes are physical (mm), screen sizes are pixels; each preset says which one it is defined in. */
@@ -172,7 +174,7 @@ function remember(r: Remembered): void {
 }
 
 /** Ask for the size and look of a new document; resolves to null when cancelled. */
-export function askNewDocument(): Promise<NewDocSpec | null> {
+export function askNewDocument(formats?: { id: string; label: string }[]): Promise<NewDocSpec | null> {
   return new Promise((resolve) => {
     const saved = recall();
     const dlg = document.createElement('dialog');
@@ -182,6 +184,7 @@ export function askNewDocument(): Promise<NewDocSpec | null> {
       <div class="nd-body">
         <div class="nd-form">
           <label>Nombre <input id="nd-name" type="text" value="Sin título" maxlength="80" /></label>
+          ${formats ? `<label>Tipo de archivo <select id="nd-format">${formats.map((f) => `<option value="${f.id}">${f.label}</option>`).join('')}</select></label>` : ''}
           <div class="row">
             <label class="grow">Tamaño
               <select id="nd-preset">${PRESETS.map((p, i) => `<option value="${i}">${p.label}</option>`).join('')}<option value="custom">Personalizado</option></select>
@@ -230,6 +233,15 @@ export function askNewDocument(): Promise<NewDocSpec | null> {
     const bleed = $<HTMLInputElement>('nd-bleed');
     const margin = $<HTMLInputElement>('nd-margin');
     const unit = (): Unit => unitSel.value as Unit;
+    const format = dlg.querySelector<HTMLSelectElement>('#nd-format');
+    if (format) {
+      try {
+        const last = localStorage.getItem(STORE_KEY + '.format');
+        if (last && formats?.some((f) => f.id === last)) format.value = last;
+      } catch {
+        // the first type of the list is the default
+      }
+    }
     let shownUnit: Unit = unit();
 
     /** The page the fields describe, or why they do not describe one. */
@@ -390,7 +402,15 @@ export function askNewDocument(): Promise<NewDocSpec | null> {
         dpi: Number(dpi.value),
         paper: noPaper.checked ? null : hexToRgb(paper.value),
         guides: page.guides,
+        format: format?.value,
       });
+      if (format) {
+        try {
+          localStorage.setItem(STORE_KEY + '.format', format.value);
+        } catch {
+          // not remembered
+        }
+      }
     });
     dlg.showModal();
     name.select();

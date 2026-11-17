@@ -29,6 +29,8 @@ export const MENUS: MenuDef[] = [
     id: 'file',
     label: 'Archivo',
     items: [
+      i('filehome', 'Inicio: explorador de archivos…'),
+      SEP,
       i('filenew', 'Nuevo…', 'Ctrl+N'),
       i('filenewfromclipboard', 'Nuevo desde el portapapeles'),
       i('fileopen', 'Abrir…', 'Ctrl+O'),
@@ -37,6 +39,7 @@ export const MENUS: MenuDef[] = [
       SEP,
       i('filesave', 'Guardar', 'Ctrl+S'),
       i('filesaveas', 'Guardar como… (cambiar archivo de trabajo)', 'Mayús+Ctrl+S', 'Guardar como…'),
+      i('filesavelibrary', 'Guardar en la biblioteca…'),
       // Another file with layers; the open document keeps its name and its file.
       sub('Guardar copia… (con capas)', [
         i('filesaveasproj', 'Formato de Lienzo (.lienzo)'),

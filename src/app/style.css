@@ -195,15 +195,35 @@ dialog.app-dialog input { background: #2b2b2e; color: var(--text); border: 1px s
 dialog.app-dialog .row { justify-content: flex-end; }
 /* Many choices at once (the file type list): a grid of equal buttons instead of one long row. */
 dialog.app-dialog .row.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; }
+/* Ayuda ▸ Buscar actualizaciones (src/app/updates-window.ts): one window that changes screens. */
+dialog.updates-dialog { --tone: var(--accent); width: min(460px, calc(92 * var(--vw))); gap: 14px; padding: 20px; }
+dialog.updates-dialog[data-tone="ok"] { --tone: #4cc38a; }
+dialog.updates-dialog[data-tone="warn"] { --tone: #f0a23a; }
+.upd-head { display: flex; align-items: center; gap: 12px; }
+.upd-title { font-size: 1.25em; font-weight: 600; }
+.upd-badge { flex: none; width: 38px; height: 38px; border-radius: 50%; display: grid; place-items: center; font-size: 20px; font-weight: 700; color: var(--tone); background: color-mix(in srgb, var(--tone) 18%, transparent); border: 1px solid color-mix(in srgb, var(--tone) 55%, transparent); }
+.upd-spin { width: 18px; height: 18px; border-radius: 50%; border: 2.5px solid color-mix(in srgb, var(--tone) 30%, transparent); border-top-color: var(--tone); animation: upd-rot 0.8s linear infinite; }
+@keyframes upd-rot { to { transform: rotate(360deg); } }
+.upd-lead { margin: 0; line-height: 1.45; white-space: pre-wrap; }
+.upd-detail { margin: 0; line-height: 1.45; color: #b4b4ba; font-size: 0.92em; white-space: pre-wrap; }
+.upd-versions { display: flex; align-items: center; justify-content: center; gap: 14px; padding: 12px; border-radius: 8px; background: #2b2b2e; border: 1px solid var(--line); }
+.upd-ver { display: flex; flex-direction: column; align-items: center; gap: 2px; min-width: 96px; }
+.upd-ver b { font-size: 1.35em; font-variant-numeric: tabular-nums; }
+.upd-ver.new b { color: var(--tone); }
+.upd-ver-label { font-size: 0.8em; text-transform: uppercase; letter-spacing: 0.06em; color: #9a9aa2; }
+.upd-arrow { font-size: 1.3em; color: #9a9aa2; }
+.upd-notes { border-radius: 8px; background: #2b2b2e; border: 1px solid var(--line); padding: 10px 12px; max-height: 180px; overflow: auto; }
+.upd-notes-title { font-size: 0.8em; text-transform: uppercase; letter-spacing: 0.06em; color: #9a9aa2; margin-bottom: 4px; }
+.upd-notes ul { margin: 0; padding-left: 18px; line-height: 1.5; }
+.upd-bar { height: 4px; border-radius: 2px; background: #2b2b2e; overflow: hidden; }
+.upd-bar i { display: block; width: 38%; height: 100%; border-radius: 2px; background: var(--tone); animation: upd-slide 1.2s ease-in-out infinite; }
+@keyframes upd-slide { from { transform: translateX(-100%); } to { transform: translateX(270%); } }
+@media (prefers-reduced-motion: reduce) { .upd-spin, .upd-bar i { animation-duration: 3s; } }
 button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
 
 #drop-hint { position: fixed; inset: 0; z-index: 50; display: flex; align-items: center; justify-content: center; background: rgba(20, 20, 24, 0.72); border: 3px dashed var(--accent); color: var(--text); font-size: max(14px, calc(1.4em * var(--ui-scale, 1))); text-align: center; padding: calc(24px * var(--ui-scale, 1)); pointer-events: none; }
 #drop-hint[hidden] { display: none; }
 
 /* No document open: no canvas, a welcome panel, and the panels that act on a document are dimmed and inert. */
-#empty-state { position: absolute; inset: 0; z-index: 5; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; background: var(--bg, #1c1c20); color: var(--text); }
-#empty-state[hidden] { display: none; }
-#empty-state p { margin: 0; opacity: 0.8; }
-#empty-state .row { display: flex; gap: 10px; }
 html.workspace-empty #canvas, html.workspace-empty #overlay { display: none; }
 html.workspace-empty #leftdock, html.workspace-empty #rightdock, html.workspace-empty #commandbar { opacity: 0.4; pointer-events: none; }

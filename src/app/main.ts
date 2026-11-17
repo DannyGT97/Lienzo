@@ -94,9 +94,14 @@ import { armStaticPalettes } from '../ui/collapsible';
 import { createSelectionUi, isFillTool, isSelectionTool } from './selection-ui';
 import { listAutosaves, newAutosaveKey, removeAutosave, startAutosave, trimAutosaves, type StoredAutosave } from './autosave';
 import { hasUnsavedChanges, judgeCopy, planRestore, readSession, writeSession } from './session-state';
-import { chooseSaveTarget, dialogReportsType, filePlatform, hasPicker, modifiedAt, openFile, readFrom, readKnownFile, saveTo, writeToTarget, type FileFilter, type FileRef } from './file-io';
+import { chooseSaveTarget, dialogReportsType, filePlatform, hasPicker, modifiedAt, openFile, openFiles, readFrom, readKnownFile, saveAs as saveAsOutside, saveTo, writeToTarget, type FileFilter, type FileRef, type SaveTarget } from './file-io';
+import { openUpdatesWindow } from './updates-window';
 import { checkForUpdates, currentVersion, findUpdate, updatesAvailable } from './updates';
-import { loadRecent, mergeRecent, sameFile, storeRecent, withoutRecent, type RecentFile } from './recent-files';
+import { loadRecent, mergeRecent, relocateRecent, sameFile, storeRecent, withoutRecent, type RecentFile } from './recent-files';
+import { createHome } from './library-ui';
+import { libraryFs } from './library-fs';
+import { createPreviewer, createThumbs } from './library-preview';
+import { joinRel, uniqueName } from './library';
 import { createSaveFlow } from './save-flow';
 import { deniedNotice, failedNotice, savedNotice, type NoticeText, type SaveStep, type SavedResult } from './save-notice';
 import { formatInfo, formatOfName, formatsFor, isLayered, type SaveFormat, type SaveKind } from './save-formats';
@@ -180,7 +185,9 @@ let clipOverwriteOk = false;
  * it never meets a missing one; it is not in a tab, is never saved or autosaved, and the next document replaces it.
  */
 let workspaceEmpty = false;
-const WORKSPACE_COMMANDS = /^(filenew|fileopen|filerecent|application|window|help)/;
+/** The home screen is shown over an open document (see `syncHome`). */
+let homeOverlay = false;
+const WORKSPACE_COMMANDS = /^(filenew|fileopen|filerecent|filehome|application|window|help)/;
 let savedRevision = history.revision;
 
 const stage = $('stage');
@@ -2184,16 +2191,37 @@ async function renderFlat(format: ImageFormat): Promise<Blob> {
   return picture;
 }
 
-async function newDocumentFlow(): Promise<void> {
-  const spec = await askNewDocument();
+/**
+ * Ask for a new document and open it. With `folder` (a folder of the library, "" for the library itself) the document is
+ * created there as a .lienzo file right away, so it is tied to that file and "Guardar" keeps writing to it.
+ */
+async function newDocumentFlow(folder: string | null = null): Promise<void> {
+  const fs = folder === null ? null : libraryFs();
+  const spec = await askNewDocument(fs ? NEW_FILE_FORMATS.map((id) => ({ id, label: `${formatInfo(id).label} (.${formatInfo(id).ext})` })) : undefined);
   if (!spec) return;
   try {
-    await openDocument(newDocument(spec.width, spec.height, spec.dpi, { paper: spec.paper, guides: spec.guides }), spec.name, null);
+    const created = newDocument(spec.width, spec.height, spec.dpi, { paper: spec.paper, guides: spec.guides });
+    if (fs && folder !== null) {
+      const format = NEW_FILE_FORMATS.find((f) => f === spec.format) ?? 'lienzo';
+      const stemName = spec.name.replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_').trim().replace(/^\.+|\.+$/g, '') || 'Sin título';
+      const fileName = uniqueName(`${stemName}.${formatInfo(format).ext}`, (await fs.list(folder)).map((e) => e.name));
+      const ref: FileRef = { kind: 'library', rel: joinRel(folder, fileName), name: fileName };
+      // The document opens tied to its file first (the encoders write the open document), then the empty file is written.
+      await openDocument(created, spec.name, ref, { format, title: fileName });
+      await fs.write(ref.rel, (await encodeAs('document', format)).blob);
+      noteRecent(ref);
+      setStatus(`Documento nuevo guardado en ${folder || 'la biblioteca'}: ${fileName}`);
+      return;
+    }
+    await openDocument(created, spec.name, null);
     setStatus(`Documento nuevo: ${spec.width} × ${spec.height} px a ${spec.dpi} ppp`);
   } catch (err) {
     reportError(err instanceof Error ? err.message : String(err));
   }
 }
+
+/** The types a document made inside the library can be created as (a .clip cannot be made from nothing). */
+const NEW_FILE_FORMATS: SaveFormat[] = ['lienzo', 'psd', 'psb', 'ora'];
 
 /** PNG through the browser's own codec, for the formats that carry one PNG per layer. */
 const pngCodecs: OraCodecs = {
@@ -2326,6 +2354,7 @@ function parkActive(): void {
 
 /** Take a parked session's document into the variables and show it. */
 function loadSession(s: DocSession): void {
+  hideHome();
   if (adjustUi.active) adjustUi.close(false);
   activeSessionId = s.id;
   doc = s.doc;
@@ -2384,6 +2413,7 @@ const isPristine = (): boolean => !docFile && !isDirty() && !history.canUndo && 
  * changes), except when `recoveredKey` says `next` is that very copy coming back: it then keeps writing to it.
  */
 function useDocument(next: Document, name: string, file: FileRef | null, recoveredKey?: string, format: SaveFormat = 'lienzo', title?: string): void {
+  hideHome();
   canvasResize.close();
   if (adjustUi.active) adjustUi.close(false);
   if (recoveredKey === undefined) {
@@ -2488,13 +2518,32 @@ async function closeTab(id: number): Promise<void> {
 function setWorkspaceEmpty(empty: boolean): void {
   workspaceEmpty = empty;
   document.documentElement.classList.toggle('workspace-empty', empty);
-  $('empty-state').hidden = !empty;
-  commands.setGate(empty ? (id) => WORKSPACE_COMMANDS.test(id) : null);
+  syncHome();
   updateStatusBar();
   persistSession();
 }
-$('empty-new').addEventListener('click', () => commands.run('filenew'));
-$('empty-open').addEventListener('click', () => commands.run('fileopen'));
+
+/** The home screen shows over an open document (File ▸ Inicio): the editor waits behind it, with only the workspace commands live. */
+function syncHome(): void {
+  const shown = workspaceEmpty || homeOverlay;
+  document.documentElement.classList.toggle('home-open', shown);
+  commands.setGate(shown ? (id) => WORKSPACE_COMMANDS.test(id) : null);
+  if (shown) home.show();
+  else home.hide();
+}
+/** Go back from the home screen to the document that was open. */
+function hideHome(): void {
+  if (!homeOverlay) return;
+  homeOverlay = false;
+  syncHome();
+}
+async function showHome(): Promise<void> {
+  if (!workspaceEmpty) {
+    await settleOpenDocument();
+    homeOverlay = true;
+  }
+  syncHome();
+}
 
 /** The four ways to write the open document; see save-flow.ts. The variables below are the ones that tie it to a file. */
 const saveFlow = createSaveFlow({
@@ -2519,7 +2568,7 @@ const saveFlow = createSaveFlow({
       'Guardar sustituirá el archivo .clip original por la versión de Lienzo (capas añadidas, borradas, movidas y convertidas incluidas). Aún no se ha comprobado con todos los .clip: si quieres conservar el original usa «Guardar copia…» o «Guardar como…» con otro nombre. ¿Sobrescribir?',
       'Sobrescribir',
     ),
-  chooseTarget: chooseSaveTarget,
+  chooseTarget: (suggested, filters) => (saveIntoLibrary ? chooseLibraryTarget(suggested) : chooseSaveTarget(suggested, filters)),
   encode: encodeAs,
   writeToRef: saveTo,
   writeToTarget,
@@ -2609,36 +2658,36 @@ let recent: RecentFile[] = [];
 let recentWork: Promise<unknown> = loadRecent().then((list) => {
   recent = list;
 });
-const changeRecent = (next: (list: RecentFile[]) => Promise<RecentFile[]>): void => {
-  recentWork = recentWork
+const changeRecent = (next: (list: RecentFile[]) => Promise<RecentFile[]>): Promise<unknown> =>
+  (recentWork = recentWork
     .then(async () => {
       recent = await next(recent);
       await storeRecent(recent);
     })
-    .catch(() => undefined);
-};
+    .catch(() => undefined));
 /** A file was opened or saved: it goes to the top of the list. */
-const noteRecent = (ref: FileRef): void => changeRecent((list) => mergeRecent(list, ref, sameFile));
+const noteRecent = (ref: FileRef): void => void changeRecent((list) => mergeRecent(list, ref, sameFile));
 
 dynamicMenus.set('recent', () => {
   if (!recent.length) return [{ id: 'filerecentnone', label: '(sin archivos recientes)' }];
   return [...recent.map((r, n): MenuEntry => ({ id: `filerecent${n}`, label: r.name })), { sep: true }, { id: 'filerecentclear', label: 'Borrar la lista' }];
 });
 for (let n = 0; n < 10; n++) commands.register(`filerecent${n}`, { run: () => openRecent(n), enabled: () => !!recent[n] });
-commands.register('filerecentclear', { run: () => changeRecent(async () => []), enabled: () => recent.length > 0 });
+commands.register('filerecentclear', { run: () => void changeRecent(async () => []), enabled: () => recent.length > 0 });
 
-async function openRecent(n: number): Promise<void> {
-  const item = recent[n];
-  if (!item) return;
+const openRecent = async (n: number): Promise<void> => void (recent[n] && (await openRef(recent[n]!.ref)));
+
+/** Open a file the app knew before (a recent one, or one of the library); when it cannot be read the person may drop it from the list. */
+async function openRef(ref: FileRef): Promise<void> {
   let blob: Blob;
   try {
-    blob = await readKnownFile(item.ref);
+    blob = await readKnownFile(ref);
   } catch (err) {
     const why = err instanceof Error ? err.message : String(err);
-    if (await confirmDialog(`No se pudo abrir «${item.name}»: ${why}\n¿Quitarlo de la lista?`, 'Quitar')) changeRecent((list) => withoutRecent(list, item.ref, sameFile));
+    if (await confirmDialog(`No se pudo abrir «${ref.name}»: ${why}\n¿Quitarlo de la lista?`, 'Quitar')) await changeRecent((list) => withoutRecent(list, ref, sameFile));
     return;
   }
-  await openBlob(blob, item.ref.name, item.ref);
+  await openBlob(blob, ref.name, ref);
 }
 
 async function openFlow(): Promise<void> {
@@ -2653,6 +2702,64 @@ async function openFlow(): Promise<void> {
     void alertDialog(err instanceof Error ? err.message : String(err), 'No se pudo abrir el archivo');
   }
 }
+
+// ---- home screen: the file explorer shown at start and from File ▸ Inicio ---------------------------------------
+const pickOutside = async (): Promise<{ blob: Blob; name: string }[]> => {
+  if (hasPicker()) return (await openFiles(OPEN_FILTERS)) ?? [];
+  return new Promise((done) => {
+    const i = document.createElement('input');
+    i.type = 'file';
+    i.multiple = true;
+    i.accept = IMAGE_ACCEPT;
+    i.addEventListener('change', () => done([...(i.files ?? [])].map((f) => ({ blob: f, name: f.name }))));
+    i.addEventListener('cancel', () => done([]));
+    i.click();
+  });
+};
+
+const home = createHome($('home'), {
+  fs: libraryFs(),
+  recent: () => recent,
+  thumbs: createThumbs(createPreviewer({ decodeImage: decodeImageFile, codecs: pngCodecs })),
+  open: openRef,
+  newDocument: (folder) => void newDocumentFlow(folder),
+  openOutside: () => void openFlow(),
+  pickOutside,
+  async exportOutside(blob, name) {
+    const ext = name.slice(name.lastIndexOf('.') + 1).toLowerCase();
+    const done = await saveAsOutside(blob, name, [{ name: `Archivo .${ext}`, extensions: [ext] }]);
+    if (!done.cancelled) setStatus(done.ref ? `«${name}» exportado.` : `«${name}» descargado.`);
+  },
+  readRef: readFrom,
+  stampOf: modifiedAt,
+  inUse: (rel) => [docFile, ...sessions.filter((s) => s.id !== activeSessionId).map((s) => s.file)].some((f) => f?.kind === 'library' && (f.rel === rel || f.rel.startsWith(`${rel}/`))),
+  moved: async (from, to) => void (await changeRecent(async (list) => relocateRecent(list, from, to))),
+  forgetRecent: async (ref) => void (await changeRecent((list) => withoutRecent(list, ref, sameFile))),
+  canReturn: () => !workspaceEmpty,
+  returned: hideHome,
+});
+commands.register('filehome', () => void showHome());
+
+/** Save As, but into a folder of the library instead of through the system's dialog. */
+let saveIntoLibrary = false;
+async function chooseLibraryTarget(suggested: string): Promise<SaveTarget | null> {
+  const folder = await home.chooseFolder('¿En qué carpeta de la biblioteca quieres guardar?');
+  if (folder === null) return null;
+  const rel = joinRel(folder, suggested);
+  if ((await home.exists(rel)) && !(await confirmDialog(`Ya hay un archivo llamado «${suggested}» en esa carpeta. ¿Sustituirlo?`, 'Sustituir'))) return null;
+  return { ref: { kind: 'library', rel, name: suggested } };
+}
+commands.register('filesavelibrary', {
+  run: async () => {
+    saveIntoLibrary = true;
+    try {
+      await saveFlow.saveAs();
+    } finally {
+      saveIntoLibrary = false;
+    }
+  },
+  enabled: () => !!libraryFs(),
+});
 
 /** "Revertir": read the document again from its file, dropping every change since it was saved. */
 async function revertFlow(): Promise<void> {
@@ -3967,10 +4074,7 @@ commands.register('helpupdates', () =>
     available: updatesAvailable,
     version: currentVersion,
     find: findUpdate,
-    confirm: confirmDialog,
-    alert: alertDialog,
-    busy: (text) => notify.busy(text),
-    say: setStatus,
+    window: openUpdatesWindow,
     beforeInstall: () => autosave.flush(),
   }),
 );
@@ -4523,7 +4627,7 @@ async function restoreSession(): Promise<void> {
     const plan = planRestore(record, current);
     for (const s of plan.stale) await removeAutosave(s.key).catch(() => undefined);
     await reopenCopies(plan.open, plan.active);
-    if (plan.emptyStart) {
+    if (plan.emptyStart || (plan.open.length === 0 && isPristine())) {
       // The throwaway blank document the app starts with is not a tab.
       sessions.length = 0;
       activeSessionId = 0;

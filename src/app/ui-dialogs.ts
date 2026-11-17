@@ -74,7 +74,10 @@ export function promptDialog(message: string, initial = ''): Promise<string | nu
     input.type = 'text';
     input.value = initial;
     input.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') done(input.value);
+      if (e.key !== 'Enter') return;
+      // Without this the same Enter, once the dialog closes, is "pressed" on the button that gets the focus back and opens it again.
+      e.preventDefault();
+      done(input.value);
     });
     const row = document.createElement('div');
     row.className = 'row';

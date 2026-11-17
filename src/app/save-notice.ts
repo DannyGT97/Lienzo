@@ -50,6 +50,7 @@ export const CLIP_NOTE = 'Lienzo escribe el .clip modificando el archivo origina
 function whereLine(r: SavedResult, platform: FilePlatform): { line: string; place?: string } {
   if (!r.ref) return { line: r.name, place: 'en las descargas del navegador' };
   if (r.ref.kind === 'tauri' && platform === 'desktop') return { line: r.ref.path };
+  if (r.ref.kind === 'library') return { line: r.ref.rel, place: 'en la biblioteca de Lienzo' };
   return { line: r.ref.name, place: platform === 'android' ? 'en la carpeta que elegiste' : 'en el lugar que elegiste' };
 }
 

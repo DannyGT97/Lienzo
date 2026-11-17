@@ -1,10 +1,11 @@
 use tauri::plugin::{Builder as PluginBuilder, TauriPlugin};
 
+mod library;
 mod update;
 
 /// The Android side of the document picker (`DocPickerPlugin.kt`): opens a file with a write grant that survives restarts.
 #[cfg(target_os = "android")]
-struct DocPicker(tauri::plugin::PluginHandle<tauri::Wry>);
+pub(crate) struct DocPicker(tauri::plugin::PluginHandle<tauri::Wry>);
 
 #[cfg(target_os = "android")]
 #[derive(serde::Serialize)]
@@ -24,6 +25,12 @@ struct CreateDocumentArgs {
 #[derive(serde::Deserialize)]
 struct PickedDocument {
   uri: Option<String>,
+}
+
+#[cfg(target_os = "android")]
+#[derive(serde::Deserialize)]
+struct PickedDocuments {
+  uris: Option<Vec<String>>,
 }
 
 #[cfg(target_os = "android")]
@@ -84,6 +91,27 @@ async fn pick_document(app: tauri::AppHandle, extensions: Vec<String>) -> Result
   {
     let _ = (app, extensions);
     Err("pick_document is only available on Android".into())
+  }
+}
+
+/// Ask Android for several documents at once (to copy them into the library). Empty when the person cancels.
+#[tauri::command]
+async fn pick_documents(app: tauri::AppHandle, extensions: Vec<String>) -> Result<Vec<String>, String> {
+  #[cfg(target_os = "android")]
+  {
+    use tauri::Manager;
+    let picker = app.state::<DocPicker>();
+    let picked: PickedDocuments = picker
+      .0
+      .run_mobile_plugin_async("pickDocuments", PickDocumentArgs { extensions })
+      .await
+      .map_err(|e| e.to_string())?;
+    Ok(picked.uris.unwrap_or_default())
+  }
+  #[cfg(not(target_os = "android"))]
+  {
+    let _ = (app, extensions);
+    Err("pick_documents is only available on Android".into())
   }
 }
 
@@ -183,7 +211,7 @@ pub fn run() {
   builder
     .plugin(tauri_plugin_dialog::init())
     .plugin(doc_picker())
-    .invoke_handler(tauri::generate_handler![pick_document, create_document, write_document, android_update_check, android_update_install])
+    .invoke_handler(tauri::generate_handler![pick_document, pick_documents, create_document, write_document, android_update_check, android_update_install, library::library_info, library::library_list, library::library_mkdir, library::library_move, library::library_copy, library::library_remove, library::library_read, library::library_write, library::library_reveal])
     .plugin(tauri_plugin_fs::init())
     .setup(|app| {
       if cfg!(debug_assertions) {

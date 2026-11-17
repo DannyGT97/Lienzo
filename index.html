@@ -7,6 +7,7 @@
     <link rel="stylesheet" href="/src/app/style.css" />
     <link rel="stylesheet" href="/src/ui/studio.css" />
     <link rel="stylesheet" href="/src/app/notify.css" />
+    <link rel="stylesheet" href="/src/app/home.css" />
   </head>
   <body>
     <div id="app">
@@ -293,10 +294,6 @@
           <button id="show-toolcol" class="dock-reopen" type="button" title="Mostrar las herramientas" aria-label="Mostrar las herramientas"></button>
           <canvas id="canvas"></canvas>
           <canvas id="overlay"></canvas>
-          <div id="empty-state" hidden>
-            <p>No hay ningún documento abierto.</p>
-            <div class="row"><button id="empty-new" class="primary" type="button">Nuevo…</button><button id="empty-open" type="button">Abrir…</button></div>
-          </div>
           <div id="path-bar" hidden>
             <span>Selección</span>
             <button id="path-close" class="primary">Cerrar</button>
@@ -392,6 +389,7 @@
       </div>
       <button type="button" id="tcp-swap" class="tcp-swap" title="Cambiar entre tamaño y opacidad" aria-label="Cambiar entre tamaño y opacidad" data-icon="swap"></button>
     </div>
+    <div id="home" hidden></div>
     <script type="module" src="/src/app/main.ts"></script>
   </body>
 </html>

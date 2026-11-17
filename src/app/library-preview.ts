@@ -1,0 +1,156 @@
+/**
+ * The small pictures on the home screen's cards. `createPreviewer` turns any file the editor opens (.lienzo, .clip, .psd,
+ * .ora, a plain picture) into a small PNG; `createThumbs` keeps them in IndexedDB (one per file, valid while the file's
+ * date and size are the same) and makes them one at a time, so a folder of big pages never freezes the window.
+ */
+import { thumbnail } from '../engine/composite';
+import { importClip, looksLikeClip } from '../engine/clip-file';
+import { SNIFF_BYTES, sniffImage, type RawImage } from '../engine/image-decode';
+import { isLienzo, loadLienzo } from '../engine/lienzo-file';
+import { importOra, looksLikeOra, type OraCodecs } from '../engine/ora-file';
+import { importPsd } from '../engine/psd';
+import type { Document } from '../engine/document';
+
+/** Longest side of a preview, in pixels (cards show it at up to ~200 css pixels, twice that for dense screens). */
+export const PREVIEW_SIDE = 360;
+
+export interface PreviewDeps {
+  decodeImage(file: File): Promise<RawImage>;
+  codecs: OraCodecs;
+}
+
+const fit = (w: number, h: number): { w: number; h: number } => {
+  const s = Math.min(1, PREVIEW_SIDE / Math.max(w, h));
+  return { w: Math.max(1, Math.round(w * s)), h: Math.max(1, Math.round(h * s)) };
+};
+
+async function pngOf(w: number, h: number, rgba: Uint8ClampedArray): Promise<Blob | null> {
+  const c = document.createElement('canvas');
+  c.width = w;
+  c.height = h;
+  c.getContext('2d')!.putImageData(new ImageData(rgba, w, h), 0, 0);
+  return new Promise((done) => c.toBlob(done, 'image/png'));
+}
+
+/** A full-size picture reduced to the preview size by the browser's own (smooth) scaler. */
+async function shrink(img: RawImage): Promise<Blob | null> {
+  const { w, h } = fit(img.width, img.height);
+  const from = document.createElement('canvas');
+  from.width = img.width;
+  from.height = img.height;
+  from.getContext('2d')!.putImageData(new ImageData(img.data, img.width, img.height), 0, 0);
+  if (w === img.width && h === img.height) return new Promise((done) => from.toBlob(done, 'image/png'));
+  const to = document.createElement('canvas');
+  to.width = w;
+  to.height = h;
+  const g = to.getContext('2d')!;
+  g.imageSmoothingQuality = 'high';
+  g.drawImage(from, 0, 0, w, h);
+  return new Promise((done) => to.toBlob(done, 'image/png'));
+}
+
+export function createPreviewer(deps: PreviewDeps): (blob: Blob, name: string) => Promise<Blob | null> {
+  const ofDocument = (doc: Document): Promise<Blob | null> => {
+    const { w, h } = fit(doc.width, doc.height);
+    return pngOf(w, h, thumbnail(doc, w, h, { output: true }));
+  };
+  return async (blob, name) => {
+    if (await isLienzo(blob)) return ofDocument(await loadLienzo(blob));
+    const head = new Uint8Array(await blob.slice(0, SNIFF_BYTES).arrayBuffer());
+    if (looksLikeClip(head)) return ofDocument((await importClip(new Uint8Array(await blob.arrayBuffer()), deps.codecs)).value);
+    if (looksLikeOra(head)) return ofDocument((await importOra(new Uint8Array(await blob.arrayBuffer()), deps.codecs)).value);
+    if (sniffImage(head, name) === 'psd') return ofDocument(importPsd(await blob.arrayBuffer()).value);
+    return shrink(await deps.decodeImage(new File([blob], name)));
+  };
+}
+
+// ---- the cache -------------------------------------------------------------------------------------------
+
+const DB = 'lienzo-thumbs';
+const STORE = 'thumbs';
+
+function openDb(): Promise<IDBDatabase> {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(DB, 1);
+    req.onupgradeneeded = () => req.result.createObjectStore(STORE);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error ?? new Error('sin almacenamiento'));
+  });
+}
+
+async function dbRun<T>(mode: IDBTransactionMode, use: (s: IDBObjectStore) => IDBRequest<T>): Promise<T> {
+  const db = await openDb();
+  try {
+    return await new Promise<T>((resolve, reject) => {
+      const tx = db.transaction(STORE, mode);
+      const req = use(tx.objectStore(STORE));
+      tx.oncomplete = () => resolve(req.result);
+      tx.onerror = tx.onabort = () => reject(tx.error ?? new Error('sin almacenamiento'));
+    });
+  } finally {
+    db.close();
+  }
+}
+
+interface Stored {
+  sig: string;
+  blob: Blob | null;
+}
+
+export interface Thumbs {
+  /**
+   * The preview of the file `id` as an object URL, or null when there is none (the file cannot be drawn). `sig` says which
+   * version of the file it is (date and size); `read` gets the file, and is only called when no valid preview is stored.
+   */
+  get(id: string, sig: string, read: () => Promise<Blob>): Promise<string | null>;
+  /** Forget the previews of a file that was deleted or moved. */
+  forget(id: string): void;
+}
+
+export function createThumbs(preview: (blob: Blob, name: string) => Promise<Blob | null>): Thumbs {
+  const urls = new Map<string, { sig: string; url: string | null }>();
+  const pending = new Map<string, Promise<string | null>>();
+  let queue: Promise<unknown> = Promise.resolve();
+
+  const urlOf = (id: string, sig: string, blob: Blob | null): string | null => {
+    const old = urls.get(id);
+    if (old?.url) URL.revokeObjectURL(old.url);
+    const url = blob ? URL.createObjectURL(blob) : null;
+    urls.set(id, { sig, url });
+    return url;
+  };
+
+  return {
+    get(id, sig, read) {
+      const have = urls.get(id);
+      if (have && have.sig === sig) return Promise.resolve(have.url);
+      const key = `${id}|${sig}`;
+      const running = pending.get(key);
+      if (running) return running;
+      const job = (queue = queue.then(async () => {
+        try {
+          const stored = await dbRun<Stored | undefined>('readonly', (s) => s.get(id)).catch(() => undefined);
+          if (stored && stored.sig === sig) return urlOf(id, sig, stored.blob);
+          let blob: Blob | null = null;
+          try {
+            blob = await preview(await read(), id.slice(id.lastIndexOf('/') + 1));
+          } catch {
+            blob = null; // a file that cannot be drawn is remembered as such, so it is not tried again every time
+          }
+          await dbRun('readwrite', (s) => s.put({ sig, blob } satisfies Stored, id)).catch(() => undefined);
+          return urlOf(id, sig, blob);
+        } finally {
+          pending.delete(key);
+        }
+      }));
+      pending.set(key, job as Promise<string | null>);
+      return job as Promise<string | null>;
+    },
+    forget(id) {
+      const old = urls.get(id);
+      if (old?.url) URL.revokeObjectURL(old.url);
+      urls.delete(id);
+      void dbRun('readwrite', (s) => s.delete(id)).catch(() => undefined);
+    },
+  };
+}

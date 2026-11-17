@@ -1,0 +1,250 @@
+//! The file library: one folder owned by the app, where the home screen keeps documents and the folders the person creates.
+//!
+//! On Windows it is `Documents\Lienzo`. On Android it is the app's folder on shared storage
+//! (`Android/data/app.lienzo.studio/files/Lienzo`, see `appFolder` in `DocPickerPlugin.kt`), which the app can use without any
+//! permission and which a computer sees over USB. Every command takes a path relative to that folder ("Manga/cap1.lienzo"); a
+//! path that is absolute, climbs out with `..`, or has a name the file systems would refuse is turned down before anything is touched.
+
+use serde::Serialize;
+use std::fs;
+use std::path::{Path, PathBuf};
+use tauri::Manager;
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Entry {
+  name: String,
+  dir: bool,
+  size: u64,
+  /// Milliseconds since 1970 (0 when the system does not say).
+  modified: u64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Info {
+  /// The folder, as the person would find it in a file explorer.
+  path: String,
+  /// Whether other apps and a computer can see it (the app's folder on shared storage); false when it is private to the app.
+  visible: bool,
+  /// Whether the system's file explorer can be opened on it (not on Android).
+  reveal: bool,
+}
+
+#[cfg(target_os = "android")]
+#[derive(serde::Deserialize)]
+struct AppFolder {
+  path: String,
+  shared: bool,
+}
+
+fn root(app: &tauri::AppHandle) -> Result<(PathBuf, bool), String> {
+  #[cfg(target_os = "android")]
+  let (dir, visible) = {
+    let picker = app.state::<crate::DocPicker>();
+    let folder: AppFolder = picker.0.run_mobile_plugin("appFolder", serde_json::json!({})).map_err(|e| e.to_string())?;
+    (PathBuf::from(folder.path), folder.shared)
+  };
+  #[cfg(not(target_os = "android"))]
+  let (dir, visible) = (app.path().document_dir().map_err(|e| format!("no se encontró la carpeta Documentos: {e}"))?.join("Lienzo"), true);
+  fs::create_dir_all(&dir).map_err(|e| format!("no se pudo crear la carpeta de la biblioteca: {e}"))?;
+  Ok((dir, visible))
+}
+
+/// A name the file systems of every platform keep: no separators or reserved characters, not hidden, not a device name.
+fn good_part(part: &str) -> bool {
+  let t = part.trim();
+  if t.is_empty() || t.len() > 240 || part != t || part.starts_with('.') || part.ends_with('.') {
+    return false;
+  }
+  if part.chars().any(|c| c.is_control() || "<>:\"/\\|?*".contains(c)) {
+    return false;
+  }
+  let stem = part.split('.').next().unwrap_or("").to_ascii_lowercase();
+  !(matches!(stem.as_str(), "con" | "prn" | "aux" | "nul") || (stem.len() == 4 && (stem.starts_with("com") || stem.starts_with("lpt")) && stem.as_bytes()[3].is_ascii_digit()))
+}
+
+/// `rel` inside `base`, or why it is not allowed. An empty `rel` is the library folder itself.
+fn resolve(base: &Path, rel: &str) -> Result<PathBuf, String> {
+  let mut out = base.to_path_buf();
+  for part in rel.split('/').filter(|p| !p.is_empty()) {
+    if !good_part(part) {
+      return Err(format!("nombre no válido: «{part}»"));
+    }
+    out.push(part);
+  }
+  Ok(out)
+}
+
+fn millis(meta: &fs::Metadata) -> u64 {
+  meta
+    .modified()
+    .ok()
+    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+    .map(|d| d.as_millis() as u64)
+    .unwrap_or(0)
+}
+
+fn copy_tree(from: &Path, to: &Path) -> Result<(), String> {
+  if from.is_dir() {
+    fs::create_dir_all(to).map_err(|e| e.to_string())?;
+    for item in fs::read_dir(from).map_err(|e| e.to_string())? {
+      let item = item.map_err(|e| e.to_string())?;
+      copy_tree(&item.path(), &to.join(item.file_name()))?;
+    }
+    Ok(())
+  } else {
+    fs::copy(from, to).map(|_| ()).map_err(|e| e.to_string())
+  }
+}
+
+#[tauri::command]
+pub async fn library_info(app: tauri::AppHandle) -> Result<Info, String> {
+  let (dir, visible) = root(&app)?;
+  Ok(Info { path: dir.to_string_lossy().into_owned(), visible, reveal: cfg!(not(target_os = "android")) })
+}
+
+#[tauri::command]
+pub async fn library_list(app: tauri::AppHandle, rel: String) -> Result<Vec<Entry>, String> {
+  let (base, _) = root(&app)?;
+  let dir = resolve(&base, &rel)?;
+  tauri::async_runtime::spawn_blocking(move || {
+    let mut out = Vec::new();
+    for item in fs::read_dir(&dir).map_err(|e| format!("no se pudo leer la carpeta: {e}"))? {
+      let Ok(item) = item else { continue };
+      let Ok(meta) = item.metadata() else { continue };
+      let name = item.file_name().to_string_lossy().into_owned();
+      if name.starts_with('.') {
+        continue;
+      }
+      out.push(Entry { name, dir: meta.is_dir(), size: if meta.is_dir() { 0 } else { meta.len() }, modified: millis(&meta) });
+    }
+    Ok(out)
+  })
+  .await
+  .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn library_mkdir(app: tauri::AppHandle, rel: String) -> Result<(), String> {
+  let (base, _) = root(&app)?;
+  let dir = resolve(&base, &rel)?;
+  if dir.exists() {
+    return Err("ya existe algo con ese nombre".into());
+  }
+  fs::create_dir_all(&dir).map_err(|e| format!("no se pudo crear la carpeta: {e}"))
+}
+
+/// Rename or move a file or folder. Refuses to replace anything and to move a folder into itself.
+#[tauri::command]
+pub async fn library_move(app: tauri::AppHandle, from: String, to: String) -> Result<(), String> {
+  let (base, _) = root(&app)?;
+  let (a, b) = (resolve(&base, &from)?, resolve(&base, &to)?);
+  if a == base {
+    return Err("la carpeta de la biblioteca no se puede mover".into());
+  }
+  if b.starts_with(&a) {
+    return Err("una carpeta no se puede mover dentro de sí misma".into());
+  }
+  if b.exists() && !a.to_string_lossy().eq_ignore_ascii_case(&b.to_string_lossy()) {
+    return Err("ya existe algo con ese nombre".into());
+  }
+  fs::rename(&a, &b).map_err(|e| format!("no se pudo mover: {e}"))
+}
+
+#[tauri::command]
+pub async fn library_copy(app: tauri::AppHandle, from: String, to: String) -> Result<(), String> {
+  let (base, _) = root(&app)?;
+  let (a, b) = (resolve(&base, &from)?, resolve(&base, &to)?);
+  if b.exists() {
+    return Err("ya existe algo con ese nombre".into());
+  }
+  if b.starts_with(&a) {
+    return Err("una carpeta no se puede copiar dentro de sí misma".into());
+  }
+  tauri::async_runtime::spawn_blocking(move || copy_tree(&a, &b)).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn library_remove(app: tauri::AppHandle, rel: String) -> Result<(), String> {
+  let (base, _) = root(&app)?;
+  let path = resolve(&base, &rel)?;
+  if path == base {
+    return Err("la carpeta de la biblioteca no se puede eliminar".into());
+  }
+  if path.is_dir() {
+    fs::remove_dir_all(&path)
+  } else {
+    fs::remove_file(&path)
+  }
+  .map_err(|e| format!("no se pudo eliminar: {e}"))
+}
+
+/// The bytes of a file, as a binary response (no JSON detour for a big document).
+#[tauri::command]
+pub async fn library_read(app: tauri::AppHandle, rel: String) -> Result<tauri::ipc::Response, String> {
+  let (base, _) = root(&app)?;
+  let path = resolve(&base, &rel)?;
+  let bytes = tauri::async_runtime::spawn_blocking(move || fs::read(path).map_err(|e| format!("no se pudo leer el archivo: {e}")))
+    .await
+    .map_err(|e| e.to_string())??;
+  Ok(tauri::ipc::Response::new(bytes))
+}
+
+/// Replace a file's contents with `data` (base64, for the reason given at `write_document`). The new copy is written next to
+/// the old one and renamed over it, so a failed write never leaves half a document.
+#[tauri::command]
+pub async fn library_write(app: tauri::AppHandle, rel: String, data: String) -> Result<(), String> {
+  use base64::Engine;
+  let (base, _) = root(&app)?;
+  let path = resolve(&base, &rel)?;
+  if path == base || path.is_dir() {
+    return Err("ahí no se puede guardar un archivo".into());
+  }
+  tauri::async_runtime::spawn_blocking(move || {
+    let bytes = base64::engine::general_purpose::STANDARD
+      .decode(data.as_bytes())
+      .map_err(|e| format!("el archivo preparado no es válido: {e}"))?;
+    drop(data);
+    let parent = path.parent().ok_or("ruta no válida")?;
+    if !parent.is_dir() {
+      return Err("la carpeta ya no existe".to_string());
+    }
+    let tmp = parent.join(format!(".{}.tmp", path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()));
+    fs::write(&tmp, &bytes).map_err(|e| format!("no se pudo escribir: {e}"))?;
+    fs::rename(&tmp, &path).map_err(|e| {
+      let _ = fs::remove_file(&tmp);
+      format!("no se pudo guardar: {e}")
+    })
+  })
+  .await
+  .map_err(|e| e.to_string())?
+}
+
+/// Open the system's file explorer on a folder of the library (the folder holding it, when `rel` is a file). Not on Android.
+#[tauri::command]
+pub async fn library_reveal(app: tauri::AppHandle, rel: String) -> Result<(), String> {
+  #[cfg(target_os = "android")]
+  {
+    let _ = (app, rel);
+    Err("el explorador de archivos no se puede abrir desde aquí en Android".into())
+  }
+  #[cfg(not(target_os = "android"))]
+  {
+    let (base, _) = root(&app)?;
+    let mut dir = resolve(&base, &rel)?;
+    if dir.is_file() {
+      dir.pop();
+    }
+    if !dir.is_dir() {
+      return Err("la carpeta ya no existe".into());
+    }
+    #[cfg(windows)]
+    let opener = "explorer";
+    #[cfg(target_os = "macos")]
+    let opener = "open";
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let opener = "xdg-open";
+    std::process::Command::new(opener).arg(&dir).spawn().map(|_| ()).map_err(|e| format!("no se pudo abrir el explorador: {e}"))
+  }
+}

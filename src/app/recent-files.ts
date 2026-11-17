@@ -17,6 +17,7 @@ export type SameFile = (a: FileRef, b: FileRef) => Promise<boolean>;
 
 export const sameFile: SameFile = async (a, b) => {
   if (a.kind === 'tauri' && b.kind === 'tauri') return a.path === b.path;
+  if (a.kind === 'library' && b.kind === 'library') return a.rel === b.rel;
   if (a.kind === 'browser' && b.kind === 'browser') {
     try {
       return await a.handle.isSameEntry(b.handle);
@@ -41,6 +42,26 @@ export async function withoutRecent(list: readonly RecentFile[], ref: FileRef, s
   return kept;
 }
 
+/**
+ * A library file or folder was moved from `from` to `to` (or deleted, when `to` is null): the entries inside it follow, or go.
+ * A renamed file keeps its place in the list under its new name.
+ */
+export function relocateRecent(list: readonly RecentFile[], from: string, to: string | null): RecentFile[] {
+  const out: RecentFile[] = [];
+  for (const item of list) {
+    const ref = item.ref;
+    if (ref.kind !== 'library' || !(ref.rel === from || ref.rel.startsWith(`${from}/`))) {
+      out.push(item);
+      continue;
+    }
+    if (to === null) continue;
+    const rel = to + ref.rel.slice(from.length);
+    const name = rel.slice(rel.lastIndexOf('/') + 1);
+    out.push({ ref: { kind: 'library', rel, name }, name });
+  }
+  return out;
+}
+
 /** Keep only entries that look like a reference the app can read back. */
 export function parseRecent(raw: unknown, max = MAX_RECENT): RecentFile[] {
   if (!Array.isArray(raw)) return [];
@@ -49,6 +70,7 @@ export function parseRecent(raw: unknown, max = MAX_RECENT): RecentFile[] {
     const ref = (item as { ref?: unknown } | null)?.ref as Partial<FileRef> | undefined;
     if (!ref || typeof ref.name !== 'string' || !ref.name) continue;
     if (ref.kind === 'tauri' && typeof (ref as { path?: unknown }).path === 'string') out.push({ ref: ref as FileRef, name: ref.name });
+    else if (ref.kind === 'library' && typeof (ref as { rel?: unknown }).rel === 'string') out.push({ ref: ref as FileRef, name: ref.name });
     else if (ref.kind === 'browser' && (ref as { handle?: unknown }).handle && typeof (ref as { handle: { getFile?: unknown } }).handle.getFile === 'function') out.push({ ref: ref as FileRef, name: ref.name });
   }
   return out.slice(0, max);

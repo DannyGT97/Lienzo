@@ -13,3 +13,4 @@ keystore.properties
 .env
 .env.*
 release-out/
+context-historial.md
