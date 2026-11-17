@@ -1,6 +1,9 @@
 // Builds, signs and describes a release: the Windows installer, the Android package and `latest.json`.
 //
-//   node scripts/release.mjs <keys-folder>
+//   node scripts/release.mjs <keys-folder> [--solo-android]
+//
+// With `--solo-android` only the signed Android package is made (in `release-out-android/`), to install it on a device with
+// `adb install -r`: no Windows build, no `latest.json`, nothing to publish.
 //
 // <keys-folder> holds `desktop/` and `android/` with the signing keys and their passwords (see `LEEME.txt` there). Nothing
 // secret is stored in this repository. The result goes to `release-out/`; publish its files as a GitHub release whose tag is
@@ -21,7 +24,8 @@ if (!process.argv[2] || !existsSync(join(keys, 'android', 'lienzo-release.jks'))
 const version = JSON.parse(readFileSync('package.json', 'utf8')).version;
 const repo = 'DannyGT97/Lienzo';
 const download = `https://github.com/${repo}/releases/download/v${version}`;
-const out = resolve('release-out');
+const androidOnly = process.argv.includes('--solo-android');
+const out = resolve(androidOnly ? 'release-out-android' : 'release-out');
 rmSync(out, { recursive: true, force: true });
 mkdirSync(out, { recursive: true });
 
@@ -30,15 +34,20 @@ const tauri = (args, env = {}) => execFileSync(process.execPath, ['node_modules/
 const sha = (file) => createHash('sha256').update(readFileSync(file)).digest('hex');
 
 // Windows: the installer and its update signature
-tauri(['build', '--bundles', 'nsis'], {
-  TAURI_SIGNING_PRIVATE_KEY: join(keys, 'desktop', 'actualizador-escritorio.key'), // a path or the key itself
-  TAURI_SIGNING_PRIVATE_KEY_PASSWORD: secret('desktop/actualizador-escritorio.password.txt'),
-});
-const target = process.env.CARGO_TARGET_DIR ?? 'src-tauri/target';
-const setup = join(target, 'release/bundle/nsis', `Lienzo_${version}_x64-setup.exe`);
-const winName = `Lienzo-${version}-windows-x64-setup.exe`;
-copyFileSync(setup, join(out, winName));
-const winSig = readFileSync(`${setup}.sig`, 'utf8').trim();
+let winName = '';
+let winSig = '';
+if (!androidOnly) {
+  tauri(['build', '--bundles', 'nsis'], {
+    TAURI_SIGNING_PRIVATE_KEY: join(keys, 'desktop', 'actualizador-escritorio.key'), // a path or the key itself
+    TAURI_SIGNING_PRIVATE_KEY_PASSWORD: secret('desktop/actualizador-escritorio.password.txt'),
+  });
+  const target = process.env.CARGO_TARGET_DIR ?? 'src-tauri/target';
+  const setup = join(target, 'release/bundle/nsis', `Lienzo_${version}_x64-setup.exe`);
+  winName = `Lienzo-${version}-windows-x64-setup.exe`;
+  copyFileSync(setup, join(out, winName));
+  winSig = readFileSync(`${setup}.sig`, 'utf8').trim();
+
+}
 
 // Android: build, align, sign with the app key, then sign the package for the updater
 tauri(['android', 'build', '--apk', '--target', 'aarch64']);
@@ -56,6 +65,10 @@ const java = process.env.JAVA_HOME ? join(process.env.JAVA_HOME, 'bin', `java${e
 execFileSync(java, ['-jar', join(buildTools, 'lib', 'apksigner.jar'), 'sign', '--ks', join(keys, 'android', 'lienzo-release.jks'), '--ks-key-alias', 'lienzo', '--ks-pass', `pass:${storePass}`, '--key-pass', `pass:${storePass}`, '--out', apk, aligned], { stdio: 'inherit' });
 rmSync(aligned);
 rmSync(`${apk}.idsig`, { force: true });
+if (androidOnly) {
+  console.log(`\nListo: ${apk}`);
+  process.exit(0);
+}
 tauri(['signer', 'sign', '-f', join(keys, 'android', 'actualizador-android.key'), '-p', secret('android/actualizador-android.password.txt'), apk]);
 const apkSig = readFileSync(`${apk}.sig`, 'utf8').trim();
 rmSync(`${apk}.sig`);

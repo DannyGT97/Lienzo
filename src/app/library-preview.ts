@@ -4,15 +4,33 @@
  * date and size are the same) and makes them one at a time, so a folder of big pages never freezes the window.
  */
 import { thumbnail } from '../engine/composite';
-import { importClip, looksLikeClip } from '../engine/clip-file';
+import { importClip, looksLikeClip, readClipPreview } from '../engine/clip-file';
 import { SNIFF_BYTES, sniffImage, type RawImage } from '../engine/image-decode';
-import { isLienzo, loadLienzo } from '../engine/lienzo-file';
-import { importOra, looksLikeOra, type OraCodecs } from '../engine/ora-file';
-import { importPsd } from '../engine/psd';
+import { isLienzo, loadLienzo, readLienzoPreview } from '../engine/lienzo-file';
+import { importOra, looksLikeOra, readOraPreview, type OraCodecs } from '../engine/ora-file';
+import { importPsd, readPsdPreview } from '../engine/psd';
+import { encodePng } from '../engine/png-encode';
 import type { Document } from '../engine/document';
 
 /** Longest side of a preview, in pixels (cards show it at up to ~200 css pixels, twice that for dense screens). */
 export const PREVIEW_SIDE = 360;
+
+/** A file to make a picture of, read in parts: a big document is never read whole when a part is enough. */
+export interface Source {
+  size: number;
+  range(start: number, end: number): Promise<Blob>;
+  all(): Promise<Blob>;
+}
+export const sourceOf = (blob: Blob): Source => ({ size: blob.size, range: async (a, b) => blob.slice(a, b), all: async () => blob });
+
+/** The small PNG kept inside a `.lienzo` file when it is saved (see `saveLienzo`). */
+export async function previewPng(doc: Document): Promise<Uint8Array | null> {
+  const { w, h } = fit(doc.width, doc.height);
+  // Looking at every pixel of a big page is slow on a tablet and not needed for a picture this small: about 16 per cell is plenty.
+  const sample = Math.max(1, Math.floor(Math.min(doc.width / w, doc.height / h) / 4));
+  const blob = await pngOf(w, h, thumbnail(doc, w, h, { output: true, sample }));
+  return new Uint8Array(await blob.arrayBuffer());
+}
 
 export interface PreviewDeps {
   decodeImage(file: File): Promise<RawImage>;
@@ -24,42 +42,73 @@ const fit = (w: number, h: number): { w: number; h: number } => {
   return { w: Math.max(1, Math.round(w * s)), h: Math.max(1, Math.round(h * s)) };
 };
 
-async function pngOf(w: number, h: number, rgba: Uint8ClampedArray): Promise<Blob | null> {
-  const c = document.createElement('canvas');
-  c.width = w;
-  c.height = h;
-  c.getContext('2d')!.putImageData(new ImageData(rgba, w, h), 0, 0);
-  return new Promise((done) => c.toBlob(done, 'image/png'));
+async function pngOf(w: number, h: number, rgba: Uint8ClampedArray): Promise<Blob> {
+  return new Blob([(await encodePng(w, h, rgba)) as BlobPart], { type: 'image/png' });
 }
 
 /** A full-size picture reduced to the preview size by the browser's own (smooth) scaler. */
-async function shrink(img: RawImage): Promise<Blob | null> {
+async function shrink(img: RawImage): Promise<Blob> {
   const { w, h } = fit(img.width, img.height);
+  if (w === img.width && h === img.height) return pngOf(w, h, img.data);
   const from = document.createElement('canvas');
   from.width = img.width;
   from.height = img.height;
   from.getContext('2d')!.putImageData(new ImageData(img.data, img.width, img.height), 0, 0);
-  if (w === img.width && h === img.height) return new Promise((done) => from.toBlob(done, 'image/png'));
   const to = document.createElement('canvas');
   to.width = w;
   to.height = h;
-  const g = to.getContext('2d')!;
+  const g = to.getContext('2d', { willReadFrequently: true })!;
   g.imageSmoothingQuality = 'high';
   g.drawImage(from, 0, 0, w, h);
-  return new Promise((done) => to.toBlob(done, 'image/png'));
+  return pngOf(w, h, g.getImageData(0, 0, w, h).data);
 }
 
-export function createPreviewer(deps: PreviewDeps): (blob: Blob, name: string) => Promise<Blob | null> {
+/** A PNG a file carries of itself, brought to the preview size (and used as it is when it already is that small). */
+async function fromPng(png: Uint8Array): Promise<Blob | null> {
+  if (png.length < 24) return null;
+  const view = new DataView(png.buffer, png.byteOffset, png.byteLength);
+  const { w, h } = fit(view.getUint32(16), view.getUint32(20));
+  if (view.getUint32(16) <= PREVIEW_SIDE && view.getUint32(20) <= PREVIEW_SIDE) return new Blob([png as BlobPart], { type: 'image/png' });
+  const bitmap = await createImageBitmap(new Blob([png as BlobPart], { type: 'image/png' }), { resizeWidth: w, resizeHeight: h, resizeQuality: 'high' });
+  const c = document.createElement('canvas');
+  c.width = w;
+  c.height = h;
+  const g = c.getContext('2d', { willReadFrequently: true })!;
+  g.drawImage(bitmap, 0, 0);
+  bitmap.close();
+  return pngOf(w, h, g.getImageData(0, 0, w, h).data);
+}
+
+export function createPreviewer(deps: PreviewDeps): (src: Source, name: string) => Promise<Blob | null> {
   const ofDocument = (doc: Document): Promise<Blob | null> => {
     const { w, h } = fit(doc.width, doc.height);
     return pngOf(w, h, thumbnail(doc, w, h, { output: true }));
   };
-  return async (blob, name) => {
+  return async (src, name) => {
+    // A .lienzo carries its own picture: it is read from the first bytes, and the whole document only when it has none.
+    const kept = await readLienzoPreview(src.range);
+    if (kept) return new Blob([kept as BlobPart], { type: 'image/png' });
+    const blob = await src.all();
     if (await isLienzo(blob)) return ofDocument(await loadLienzo(blob));
     const head = new Uint8Array(await blob.slice(0, SNIFF_BYTES).arrayBuffer());
-    if (looksLikeClip(head)) return ofDocument((await importClip(new Uint8Array(await blob.arrayBuffer()), deps.codecs)).value);
-    if (looksLikeOra(head)) return ofDocument((await importOra(new Uint8Array(await blob.arrayBuffer()), deps.codecs)).value);
-    if (sniffImage(head, name) === 'psd') return ofDocument(importPsd(await blob.arrayBuffer()).value);
+    // Each format keeps a picture of its page: it is used when it is there, and the layers are only read when it is not.
+    if (looksLikeClip(head)) {
+      const bytes = new Uint8Array(await blob.arrayBuffer());
+      const png = readClipPreview(bytes);
+      const quick = png ? await fromPng(png).catch(() => null) : null;
+      return quick ?? ofDocument((await importClip(bytes, deps.codecs)).value);
+    }
+    if (looksLikeOra(head)) {
+      const bytes = new Uint8Array(await blob.arrayBuffer());
+      const png = await readOraPreview(bytes);
+      const quick = png ? await fromPng(png).catch(() => null) : null;
+      return quick ?? ofDocument((await importOra(bytes, deps.codecs)).value);
+    }
+    if (sniffImage(head, name) === 'psd') {
+      const buffer = await blob.arrayBuffer();
+      const merged = readPsdPreview(buffer);
+      return merged ? shrink(merged) : ofDocument(importPsd(buffer).value);
+    }
     return shrink(await deps.decodeImage(new File([blob], name)));
   };
 }
@@ -102,12 +151,14 @@ export interface Thumbs {
    * The preview of the file `id` as an object URL, or null when there is none (the file cannot be drawn). `sig` says which
    * version of the file it is (date and size); `read` gets the file, and is only called when no valid preview is stored.
    */
-  get(id: string, sig: string, read: () => Promise<Blob>): Promise<string | null>;
+  get(id: string, sig: string, read: () => Source): Promise<string | null>;
+  /** The preview if it is already in memory (null: known to have none; undefined: not known yet). Never waits. */
+  peek(id: string, sig: string): string | null | undefined;
   /** Forget the previews of a file that was deleted or moved. */
   forget(id: string): void;
 }
 
-export function createThumbs(preview: (blob: Blob, name: string) => Promise<Blob | null>): Thumbs {
+export function createThumbs(preview: (src: Source, name: string) => Promise<Blob | null>): Thumbs {
   const urls = new Map<string, { sig: string; url: string | null }>();
   const pending = new Map<string, Promise<string | null>>();
   let queue: Promise<unknown> = Promise.resolve();
@@ -121,6 +172,10 @@ export function createThumbs(preview: (blob: Blob, name: string) => Promise<Blob
   };
 
   return {
+    peek(id, sig) {
+      const have = urls.get(id);
+      return have && have.sig === sig ? have.url : undefined;
+    },
     get(id, sig, read) {
       const have = urls.get(id);
       if (have && have.sig === sig) return Promise.resolve(have.url);
@@ -133,7 +188,7 @@ export function createThumbs(preview: (blob: Blob, name: string) => Promise<Blob
           if (stored && stored.sig === sig) return urlOf(id, sig, stored.blob);
           let blob: Blob | null = null;
           try {
-            blob = await preview(await read(), id.slice(id.lastIndexOf('/') + 1));
+            blob = await preview(read(), id.slice(id.lastIndexOf('/') + 1));
           } catch {
             blob = null; // a file that cannot be drawn is remembered as such, so it is not tried again every time
           }

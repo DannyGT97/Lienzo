@@ -197,6 +197,19 @@ describe('compositing folders', () => {
     expect(t[3]).toBe(255);
   });
 
+  it('a thumbnail that looks at fewer pixels gives the same colours, and covers the cells just as much', () => {
+    const doc = createDocument(512, 512, 300);
+    const l = addLayer(doc, 'Dibujo');
+    fillLayer(l, [200, 40, 10, 255]);
+    const full = thumbnail(doc, 16, 16);
+    for (const sample of [2, 3, 4]) {
+      const part = thumbnail(doc, 16, 16, { sample });
+      for (const i of [0, 4 * 17, 4 * 255]) {
+        expect(Array.from(part.subarray(i, i + 4))).toEqual(Array.from(full.subarray(i, i + 4)));
+      }
+    }
+  });
+
   it('draft and reference layers are shown while working but left out of the output', () => {
     const { doc, a, b } = stack();
     fillLayer(doc.layers.find((l) => l.id === a)!, [255, 255, 255, 255]);

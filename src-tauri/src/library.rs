@@ -29,25 +29,36 @@ pub struct Info {
   visible: bool,
   /// Whether the system's file explorer can be opened on it (not on Android).
   reveal: bool,
+  /// Android: the library is still in the app's own folder because the person has not allowed access to all files yet.
+  needs_access: bool,
 }
 
 #[cfg(target_os = "android")]
 #[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct AppFolder {
   path: String,
   shared: bool,
+  needs_access: bool,
+}
+
+/// The library folder, whether other apps can see it, and whether the app still needs the person's permission to use the shared
+/// folder (Android only; until it is given the app's own folder is used).
+fn root_full(app: &tauri::AppHandle) -> Result<(PathBuf, bool, bool), String> {
+  #[cfg(target_os = "android")]
+  let (dir, visible, needs_access) = {
+    let picker = app.state::<crate::DocPicker>();
+    let folder: AppFolder = picker.0.run_mobile_plugin("appFolder", serde_json::json!({})).map_err(|e| e.to_string())?;
+    (PathBuf::from(folder.path), folder.shared, folder.needs_access)
+  };
+  #[cfg(not(target_os = "android"))]
+  let (dir, visible, needs_access) = (app.path().document_dir().map_err(|e| format!("no se encontró la carpeta Documentos: {e}"))?.join("Lienzo"), true, false);
+  fs::create_dir_all(&dir).map_err(|e| format!("no se pudo crear la carpeta de la biblioteca: {e}"))?;
+  Ok((dir, visible, needs_access))
 }
 
 fn root(app: &tauri::AppHandle) -> Result<(PathBuf, bool), String> {
-  #[cfg(target_os = "android")]
-  let (dir, visible) = {
-    let picker = app.state::<crate::DocPicker>();
-    let folder: AppFolder = picker.0.run_mobile_plugin("appFolder", serde_json::json!({})).map_err(|e| e.to_string())?;
-    (PathBuf::from(folder.path), folder.shared)
-  };
-  #[cfg(not(target_os = "android"))]
-  let (dir, visible) = (app.path().document_dir().map_err(|e| format!("no se encontró la carpeta Documentos: {e}"))?.join("Lienzo"), true);
-  fs::create_dir_all(&dir).map_err(|e| format!("no se pudo crear la carpeta de la biblioteca: {e}"))?;
+  let (dir, visible, _) = root_full(app)?;
   Ok((dir, visible))
 }
 
@@ -100,8 +111,8 @@ fn copy_tree(from: &Path, to: &Path) -> Result<(), String> {
 
 #[tauri::command]
 pub async fn library_info(app: tauri::AppHandle) -> Result<Info, String> {
-  let (dir, visible) = root(&app)?;
-  Ok(Info { path: dir.to_string_lossy().into_owned(), visible, reveal: cfg!(not(target_os = "android")) })
+  let (dir, visible, needs_access) = root_full(&app)?;
+  Ok(Info { path: dir.to_string_lossy().into_owned(), visible, reveal: cfg!(not(target_os = "android")), needs_access })
 }
 
 #[tauri::command]
@@ -191,6 +202,24 @@ pub async fn library_read(app: tauri::AppHandle, rel: String) -> Result<tauri::i
   Ok(tauri::ipc::Response::new(bytes))
 }
 
+/// Bytes `start` to `end` of a file (as many as there are), so the picture of a big document is found without reading all of it.
+#[tauri::command]
+pub async fn library_read_range(app: tauri::AppHandle, rel: String, start: u64, end: u64) -> Result<tauri::ipc::Response, String> {
+  use std::io::{Read, Seek, SeekFrom};
+  let (base, _) = root(&app)?;
+  let path = resolve(&base, &rel)?;
+  let bytes = tauri::async_runtime::spawn_blocking(move || {
+    let mut file = fs::File::open(path).map_err(|e| format!("no se pudo leer el archivo: {e}"))?;
+    file.seek(SeekFrom::Start(start)).map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    file.take(end.saturating_sub(start).min(256 * 1024 * 1024)).read_to_end(&mut out).map_err(|e| e.to_string())?;
+    Ok::<Vec<u8>, String>(out)
+  })
+  .await
+  .map_err(|e| e.to_string())??;
+  Ok(tauri::ipc::Response::new(bytes))
+}
+
 /// Replace a file's contents with `data` (base64, for the reason given at `write_document`). The new copy is written next to
 /// the old one and renamed over it, so a failed write never leaves half a document.
 #[tauri::command]
@@ -246,5 +275,21 @@ pub async fn library_reveal(app: tauri::AppHandle, rel: String) -> Result<(), St
     #[cfg(all(unix, not(target_os = "macos")))]
     let opener = "xdg-open";
     std::process::Command::new(opener).arg(&dir).spawn().map(|_| ()).map_err(|e| format!("no se pudo abrir el explorador: {e}"))
+  }
+}
+
+/// Android: open the system page where the person allows Lienzo to use all files, so the library can live in Documents/Lienzo.
+#[tauri::command]
+pub async fn library_request_access(app: tauri::AppHandle) -> Result<(), String> {
+  #[cfg(target_os = "android")]
+  {
+    let picker = app.state::<crate::DocPicker>();
+    picker.0.run_mobile_plugin::<serde_json::Value>("requestStorageAccess", serde_json::json!({})).map_err(|e| e.to_string())?;
+    Ok(())
+  }
+  #[cfg(not(target_os = "android"))]
+  {
+    let _ = app;
+    Ok(())
   }
 }

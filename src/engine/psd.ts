@@ -209,6 +209,23 @@ export function exportFlatPsd(doc: Document, options: { large?: boolean } = {}):
   return { value: out.slice(0), warnings: [] };
 }
 
+/**
+ * The merged picture a PSD/PSB carries (what Photoshop keeps for programs that cannot read layers), without decoding any layer.
+ * Null when the file has none, it is blank, or it cannot be read: the caller then reads the whole file.
+ */
+export function readPsdPreview(buffer: ArrayBuffer): { width: number; height: number; data: Uint8ClampedArray } | null {
+  try {
+    const psd = readPsd(buffer, { useImageData: true, skipThumbnail: true, skipLayerImageData: true });
+    if (psd.bitsPerChannel !== undefined && psd.bitsPerChannel !== 8) return null;
+    const img = psd.imageData;
+    if (!img) return null;
+    for (let i = 3; i < img.data.length; i += 4) if (img.data[i] !== 0) return { width: img.width, height: img.height, data: img.data as unknown as Uint8ClampedArray };
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 export function importPsd(buffer: ArrayBuffer): PsdResult<Document> {
   const warnings: string[] = [];
   const psd = readPsd(buffer, { useImageData: true, skipThumbnail: true });

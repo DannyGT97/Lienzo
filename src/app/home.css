@@ -93,3 +93,45 @@
 
 .home-where { margin-top: 6px; text-align: left; background: transparent; border-color: transparent; opacity: 0.85; }
 .home-where:hover { opacity: 1; }
+
+/* Mientras se abre un archivo grande el aviso tapa la ventana: ningún toque más lo abre otra vez. */
+.home-busy { position: absolute; inset: 0; z-index: 8; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; padding: 24px; text-align: center; font-size: 17px; font-weight: 600; background: rgba(20, 20, 24, 0.78); }
+.home-busy-text { max-width: min(90vw, 560px); overflow-wrap: anywhere; }
+.home-busy-bar { width: min(80vw, 420px); height: 10px; border-radius: 5px; background: #3a3a41; overflow: hidden; }
+.home-busy-bar[hidden], .home-busy button[hidden] { display: none; }
+.home-busy-bar i { display: block; height: 100%; width: 0; background: var(--accent); transition: width 0.15s; }
+.home-busy[hidden] { display: none; }
+/* Llevar un elemento con el dedo: se levanta, una etiqueta sigue al dedo y la carpeta de debajo se ilumina. */
+.home-card.lifted { opacity: 0.75; transform: scale(1.04); box-shadow: 0 10px 28px rgba(0, 0, 0, 0.55); }
+.home-frow.lifted { background: #4a4a52; }
+.home-ghost { position: fixed; z-index: 60; pointer-events: none; transform: translate(-50%, -150%); max-width: 70vw; padding: 7px 14px; border-radius: 10px; background: var(--accent); color: #fff; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; box-shadow: 0 6px 18px rgba(0, 0, 0, 0.5); }
+
+/* Un dedo que mantiene pulsado no debe seleccionar, ni sacar el menú de imagen del sistema. */
+.home-card, .home-frow { -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }
+.home-thumb { pointer-events: none; }
+
+/* Android: aviso de que la biblioteca aún está en la carpeta privada y botón para dar acceso. */
+.home-access { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin: 10px 14px 0; padding: 10px 12px; border-radius: 8px; background: #3d3a2a; border: 1px solid #6b6340; font-size: 13px; line-height: 1.4; }
+.home-access[hidden] { display: none; }
+.home-access span { flex: 1; min-width: 200px; }
+
+/* La ventana para elegir una carpeta (library-picker.ts): lista con sangría, carpeta elegida marcada, filas altas para el dedo. */
+dialog.pick-dialog { width: min(620px, calc(94 * var(--vw))); max-height: calc(86 * var(--vh)); gap: 12px; padding: 20px; font-size: 15px; }
+.pick-dialog h3 { font-size: 19px; }
+.pick-dialog .msg { opacity: 0.8; }
+.pick-list { flex: 1; min-height: 160px; max-height: calc(58 * var(--vh)); overflow: auto; display: flex; flex-direction: column; gap: 2px; padding: 4px; border: 1px solid var(--line); border-radius: 8px; background: #2b2b2e; outline: none; }
+.pick-list:focus-visible { border-color: var(--accent); }
+.pick-row { display: flex; align-items: center; gap: 12px; text-align: left; min-height: 50px; padding: 8px 14px; font-size: 15px; border: 0; border-radius: 6px; background: transparent; }
+.pick-row:hover:not(.off) { background: #3d3d44; }
+.pick-row.on { background: var(--accent); color: #fff; }
+.pick-row.off { opacity: 0.45; cursor: default; }
+.pick-icon { flex: none; width: 26px; color: #8d98b8; display: inline-flex; }
+.pick-row.on .pick-icon { color: #fff; }
+.pick-icon svg { width: 100%; }
+.pick-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pick-why { flex: none; font-size: 13px; opacity: 0.85; }
+.pick-foot { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.pick-gap { flex: 1; }
+.pick-foot button { min-height: 46px; font-size: 15px; padding-inline: 16px; }
+.pick-foot button:disabled { opacity: 0.45; }
+@media (pointer: coarse) { .pick-row { min-height: 58px; } .pick-foot button { min-height: 54px; padding-inline: 20px; } }

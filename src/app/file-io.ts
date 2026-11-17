@@ -294,11 +294,14 @@ export async function openFile(filters: FileFilter[]): Promise<{ ref: FileRef | 
   return null; // the caller falls back to its own file input
 }
 
+/** A file the person chose, to be read when its turn comes (so a long list can show its progress and be stopped). */
+export type PickedFile = () => Promise<{ blob: Blob; name: string }>;
+
 /**
- * Let the person choose several files at once, to copy them somewhere (the library); the bytes of each are read right away.
- * Null when cancelled, and also when there is no picker that allows several (the caller then uses a file input).
+ * Let the person choose several files at once, to copy them somewhere (the library). Nothing is read yet: each answer reads its
+ * file when called. Null when cancelled, and also when there is no picker that allows several (the caller then uses a file input).
  */
-export async function openFiles(filters: FileFilter[]): Promise<{ blob: Blob; name: string }[] | null> {
+export async function openFiles(filters: FileFilter[]): Promise<PickedFile[] | null> {
   if (isApp()) {
     const { readFile } = await import('@tauri-apps/plugin-fs');
     let paths: string[];
@@ -311,16 +314,14 @@ export async function openFiles(filters: FileFilter[]): Promise<{ blob: Blob; na
       paths = Array.isArray(picked) ? picked : picked ? [picked] : [];
     }
     if (!paths.length) return null;
-    const out: { blob: Blob; name: string }[] = [];
-    for (const path of paths) out.push({ blob: new Blob([(await readFile(path)) as BlobPart]), name: await displayName(path) });
-    return out;
+    return paths.map((path): PickedFile => async () => ({ blob: new Blob([(await readFile(path)) as BlobPart]), name: await displayName(path) }));
   }
   const w = window as PickerWindow;
   if (w.showOpenFilePicker) {
     try {
       const handles = await w.showOpenFilePicker({ types: pickerTypes(filters), multiple: true });
       if (!handles.length) return null;
-      return await Promise.all(handles.map(async (h) => ({ blob: await h.getFile(), name: h.name })));
+      return handles.map((h): PickedFile => async () => ({ blob: await h.getFile(), name: h.name }));
     } catch (err) {
       if (err instanceof DOMException && err.name === 'AbortError') return null;
       throw err;

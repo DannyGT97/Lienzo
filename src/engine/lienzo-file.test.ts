@@ -6,7 +6,7 @@ import { TILE, TiledSurface } from './tiles';
 import { addComp } from './layer-comps';
 import { groupLayers } from './layer-tree';
 import { createMask } from './mask-ops';
-import { LIENZO_VERSION, isLienzo, loadLienzo, saveLienzo } from './lienzo-file';
+import { LIENZO_VERSION, isLienzo, loadLienzo, readLienzoPreview, saveLienzo } from './lienzo-file';
 import { Selection } from './selection';
 import { fillLayer, setPixel } from './test-utils';
 
@@ -204,5 +204,32 @@ describe('what a layer holds beyond the page', () => {
     expect(l.surface.pixel(5, 5)).toEqual([255, 0, 0, 255]);
     expect(l.overflow).toMatchObject({ x: -20, y: -10 });
     expect(l.overflow!.surface.pixel(250, 200)).toEqual([0, 255, 0, 255]);
+  });
+});
+
+describe('the picture kept inside a file', () => {
+  const png = Uint8Array.from({ length: 70_000 }, (_, i) => (i * 31) & 255); // bigger than one chunk of the base64 writer
+
+  it('is read from the first bytes only, and the document still loads', async () => {
+    const blob = await saveLienzo(sample(), { preview: async () => png });
+    const asked: [number, number][] = [];
+    const got = await readLienzoPreview(async (a, b) => {
+      asked.push([a, b]);
+      return blob.slice(a, b);
+    });
+    expect(got).toEqual(png);
+    expect(asked.length).toBe(2); // the header, then the description: never the pixels
+    expect(Math.max(...asked.map(([, b]) => b))).toBeLessThan(blob.size);
+    const back = await loadLienzo(blob);
+    expect(back.layers.length).toBe(sample().layers.length);
+  });
+
+  it('is absent when the file was saved without one, and for what is not a document', async () => {
+    const plain = await saveLienzo(sample());
+    expect(await readLienzoPreview(async (a, b) => plain.slice(a, b))).toBeNull();
+    const failing = await saveLienzo(sample(), { preview: async () => Promise.reject(new Error('sin lienzo')) });
+    expect(await readLienzoPreview(async (a, b) => failing.slice(a, b))).toBeNull();
+    const other = new Blob([new Uint8Array(40)]);
+    expect(await readLienzoPreview(async (a, b) => other.slice(a, b))).toBeNull();
   });
 });

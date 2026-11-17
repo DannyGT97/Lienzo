@@ -26,6 +26,13 @@ export interface View {
 const MIP_LEVELS = 5;
 /** Milliseconds per frame spent building tile mip levels on the CPU (the first tile of a frame is built regardless). */
 const MIP_BUDGET_MS = 4;
+/**
+ * Milliseconds per frame spent putting changed tiles into the GPU. A page that was just opened (or came back from another tab)
+ * has thousands of them; sent at once they freeze the window for seconds on a tablet. Past this budget the rest waits for the
+ * next frame, and the page fills in meanwhile. A frame always sends at least `UPLOAD_MIN_TILES`, so painting never waits.
+ */
+const UPLOAD_BUDGET_MS = 24;
+const UPLOAD_MIN_TILES = 24;
 /** How long the view must stay still before a zoom in progress is composed sharp again. */
 const SETTLE_MS = 140;
 /** While a zoom keeps going, a sharp frame is composed at least this often, so what the resampled cache does not cover fills in. */
@@ -385,6 +392,10 @@ export class GLRenderer {
   private mipLate = new Map<WebGLTexture, { map: Map<number, WebGLTexture>; surface: TiledSurface; key: number }>();
   /** When this frame's time for building smaller levels ends, and how many tiles it built so far. */
   private mipDeadline = 0;
+  /** When this frame's share of tile uploads ends (infinite outside a frame: a snapshot sends everything). */
+  private uploadDeadline = Infinity;
+  private uploaded = 0;
+  private uploadLeft = false;
   private mipDone = 0;
   /** Tonal corrections being tried on layers: the table each one applies to its own colour, and the texture holding it. */
   private previews = new Map<number, { lut: AdjustLut; tex: WebGLTexture }>();
@@ -867,11 +878,11 @@ export class GLRenderer {
     const aliveMasks = new Set<number>();
     for (const layer of doc.layers) {
       alive.add(layer.id);
+      if (layer.mask) aliveMasks.add(layer.id);
+      // A hidden layer is not drawn, so its pixels are not sent: they stay marked as changed and go in when it is shown.
+      if (!layer.visible) continue;
       this.uploadDirty(this.textures, layer.id, layer.surface);
-      if (layer.mask) {
-        aliveMasks.add(layer.id);
-        this.uploadDirty(this.maskTextures, layer.id, layer.mask.surface);
-      }
+      if (layer.mask) this.uploadDirty(this.maskTextures, layer.id, layer.mask.surface);
     }
     for (const [store, ids] of [[this.textures, alive], [this.maskTextures, aliveMasks]] as const) {
       for (const [id, map] of store) {
@@ -890,7 +901,13 @@ export class GLRenderer {
     if (!map) store.set(id, (map = new Map()));
     const keys = surface.takeDirty();
     if (keys.length) this.dirtyLayers.add(id);
-    for (const key of keys) {
+    for (let i = 0; i < keys.length; i++) {
+      if (this.uploaded >= UPLOAD_MIN_TILES && performance.now() > this.uploadDeadline) {
+        surface.redirty(keys.slice(i)); // out of time for this frame: the rest is asked for again next frame
+        this.uploadLeft = true;
+        break;
+      }
+      const key = keys[i]!;
       this.thumbValid = false;
       this.markDirty(surface.tx(key) * TILE, surface.ty(key) * TILE);
       const tile = surface.getByKey(key);
@@ -908,6 +925,7 @@ export class GLRenderer {
       }
       gl.bindTexture(gl.TEXTURE_2D, tex);
       gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, TILE, TILE, gl.RGBA, gl.UNSIGNED_BYTE, tile);
+      this.uploaded++;
       this.mipFresh.delete(tex);
       this.bounds.delete(tex);
     }
@@ -938,7 +956,12 @@ export class GLRenderer {
     // The page is composed on the plane, which is the screen turned back to the page's orientation.
     const { W, H } = this.planePixels();
     this.ensureTargets(W, H);
+    this.uploadDeadline = performance.now() + UPLOAD_BUDGET_MS;
+    this.uploaded = 0;
+    this.uploadLeft = false;
     this.sync();
+    this.uploadDeadline = Infinity;
+    if (this.uploadLeft) this.schedule(); // tiles are still waiting: they go in on the next frame
     if (this.belowValid && this.dirtyLayers.size) {
       // Pixels of a layer under the one being painted changed (an undo, a tool on another layer): what was kept is out of date.
       const active = doc.layers.findIndex((l) => l.id === doc.activeId);

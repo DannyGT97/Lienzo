@@ -202,6 +202,22 @@ async fn write_document(app: tauri::AppHandle, path: String, data: String) -> Re
   .map_err(|e| e.to_string())?
 }
 
+/// What kind of build this is, for "Acerca de": a test build (debug) or the one published as a release.
+#[derive(serde::Serialize)]
+struct BuildInfo {
+  debug: bool,
+  os: &'static str,
+  identifier: String,
+}
+
+#[tauri::command]
+fn build_info(app: tauri::AppHandle) -> BuildInfo {
+  let id = app.config().identifier.clone();
+  // The Android test build gets a ".debug" suffix from Gradle (see build.gradle.kts), which the configuration does not know about.
+  let identifier = if cfg!(all(debug_assertions, target_os = "android")) { format!("{id}.debug") } else { id };
+  BuildInfo { debug: cfg!(debug_assertions), os: std::env::consts::OS, identifier }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
   let builder = tauri::Builder::default();
@@ -211,7 +227,7 @@ pub fn run() {
   builder
     .plugin(tauri_plugin_dialog::init())
     .plugin(doc_picker())
-    .invoke_handler(tauri::generate_handler![pick_document, pick_documents, create_document, write_document, android_update_check, android_update_install, library::library_info, library::library_list, library::library_mkdir, library::library_move, library::library_copy, library::library_remove, library::library_read, library::library_write, library::library_reveal])
+    .invoke_handler(tauri::generate_handler![build_info, pick_document, pick_documents, create_document, write_document, android_update_check, android_update_install, library::library_info, library::library_list, library::library_mkdir, library::library_move, library::library_copy, library::library_remove, library::library_read, library::library_read_range, library::library_write, library::library_reveal, library::library_request_access])
     .plugin(tauri_plugin_fs::init())
     .setup(|app| {
       if cfg!(debug_assertions) {

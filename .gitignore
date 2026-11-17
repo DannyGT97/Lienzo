@@ -13,4 +13,5 @@ keystore.properties
 .env
 .env.*
 release-out/
+release-out-android/
 context-historial.md

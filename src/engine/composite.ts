@@ -173,6 +173,8 @@ export interface CompositeOptions {
   output?: boolean;
   /** Look only at the reference layers (what the fill and auto-select tools use when there are any). */
   only?: 'reference';
+  /** For a small picture of the page: look at one pixel in every `sample` in each direction (a quarter of the work at 2, a ninth at 3). */
+  sample?: number;
 }
 
 const noRead = (o: number[]): void => {
@@ -450,23 +452,23 @@ const reducedCache = new WeakMap<object, { revision: number; docW: number; docH:
  * Average colour and coverage of a layer over each cell of a w×h grid (every painted pixel counts). The result is kept while the
  * layer's pixels do not change: the layer thumbnails and the navigator ask for it after every edit, for every layer.
  */
-function downsampleLayer(layer: Layer, docW: number, docH: number, w: number, h: number): Reduced {
+function downsampleLayer(layer: Layer, docW: number, docH: number, w: number, h: number, step = 1): Reduced {
   const surface = layer.surface;
   let entry = reducedCache.get(surface);
   if (!entry || entry.revision !== surface.revision || entry.docW !== docW || entry.docH !== docH) {
     entry = { revision: surface.revision, docW, docH, bySize: new Map() };
     reducedCache.set(surface, entry);
   }
-  const key = `${w}x${h}`;
+  const key = `${w}x${h}x${step}`;
   let r = entry.bySize.get(key);
   if (!r) {
-    r = computeReduced(layer, docW, docH, w, h);
+    r = computeReduced(layer, docW, docH, w, h, step);
     entry.bySize.set(key, r);
   }
   return r;
 }
 
-function computeReduced(layer: Layer, docW: number, docH: number, w: number, h: number): Reduced {
+function computeReduced(layer: Layer, docW: number, docH: number, w: number, h: number, step = 1): Reduced {
   const n = w * h;
   const sum = { r: new Float32Array(n), g: new Float32Array(n), b: new Float32Array(n), a: new Float32Array(n) };
   const kx = w / docW;
@@ -476,11 +478,11 @@ function computeReduced(layer: Layer, docW: number, docH: number, w: number, h: 
     // Which cell each column of the tile falls in: the same for every row.
     const xEnd = Math.min(TILE, docW - tx * TILE);
     for (let x = 0; x < xEnd; x++) cols[x] = Math.min(w - 1, Math.floor((tx * TILE + x) * kx));
-    for (let y = 0; y < TILE; y++) {
+    for (let y = 0; y < TILE; y += step) {
       const py = ty * TILE + y;
       if (py >= docH) break;
       const cy = Math.min(h - 1, Math.floor(py * ky)) * w;
-      for (let x = 0, o = y * TILE * 4; x < xEnd; x++, o += 4) {
+      for (let x = 0, o = y * TILE * 4; x < xEnd; x += step, o += 4 * step) {
         const al = tile[o + 3]!;
         if (al === 0) continue;
         const i = cy + cols[x]!;
@@ -492,7 +494,7 @@ function computeReduced(layer: Layer, docW: number, docH: number, w: number, h: 
       }
     }
   }
-  const area = (docW / w) * (docH / h);
+  const area = ((docW / w) * (docH / h)) / (step * step); // fewer pixels were looked at, so a full cell holds fewer
   for (let i = 0; i < n; i++) {
     const a = sum.a[i]!;
     if (a > 0) {
@@ -543,7 +545,7 @@ export function thumbnail(doc: Document, w: number, h: number, opts: CompositeOp
       else if (l.kind === 'paper') plan.push({ layer: l, children: [], read: paperReader(l), maskAt });
       else if (l.kind === 'adjust') plan.push({ layer: l, children: [], read: noRead, maskAt, adjust: adjustOf(l) });
       else {
-        const d = downsampleLayer(l, doc.width, doc.height, w, h);
+        const d = downsampleLayer(l, doc.width, doc.height, w, h, Math.max(1, Math.floor(opts.sample ?? 1)));
         plan.push({
           layer: l,
           children: [],

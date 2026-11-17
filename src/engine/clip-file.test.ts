@@ -165,6 +165,17 @@ describe('importClip', () => {
     expect(warnings.some((w) => /Modos de mezcla/.test(w) && w.includes('5'))).toBe(true);
   });
 
+  it('reads a layer of another type (an image, a vector layer) as a picture and groups the notices', async () => {
+    // "Capa 1" becomes a layer of type 2: its drawn pixels are still there, so they are shown, but it is not written back.
+    const { bytes } = await fixture((db) => db.run('UPDATE Layer SET LayerType = 2 WHERE MainId = 3'));
+    const { value, warnings } = await importClip(bytes);
+    const capa = value.layers.find((l) => l.name === 'Capa 1')!;
+    expect(px(capa, 5, 5)).toEqual([255, 0, 0, 255]);
+    expect(clipOriginOf(value)!.layers.get(capa.id)!.editable).toBe(false);
+    expect(warnings.filter((w) => w.includes('leídas como imagen')).length).toBe(1);
+    expect(warnings.some((w) => w.includes('"Capa 1"') && w.includes('no se reescribirán'))).toBe(true);
+  });
+
   it('says which layers it could not fill instead of failing', async () => {
     const { bytes } = await fixture((db) => db.run('UPDATE Layer SET LayerRenderMipmap = 0 WHERE MainId = 3'));
     const { value, warnings } = await importClip(bytes);

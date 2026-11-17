@@ -229,3 +229,18 @@ export function looksLikeOra(head: Uint8Array): boolean {
   const dataAt = 30 + nameLen + extra;
   return new TextDecoder().decode(head.subarray(dataAt, dataAt + 16)) === 'image/openraster';
 }
+
+/**
+ * The picture an OpenRaster file carries of itself (its thumbnail, or the merged image), as PNG bytes, without reading a single
+ * layer. Null when there is none or the file cannot be read.
+ */
+export async function readOraPreview(bytes: Uint8Array): Promise<Uint8Array | null> {
+  try {
+    const clean = (n: string): string => n.replace(/^\.?\//, '');
+    const entries = await readZip(bytes, (n) => clean(n) === 'Thumbnails/thumbnail.png' || clean(n) === 'mergedimage.png');
+    const by = new Map(entries.map((e) => [clean(e.name), e.data] as const));
+    return by.get('Thumbnails/thumbnail.png') ?? by.get('mergedimage.png') ?? null;
+  } catch {
+    return null;
+  }
+}

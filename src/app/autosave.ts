@@ -128,20 +128,28 @@ export function startAutosave(d: {
   onError: (message: string) => void;
   /** Milliseconds between copies while the document is being worked on, or null for none (read each time, so a preference takes effect at once). A copy is always written when the app goes to the background. */
   everyMs: () => number | null;
-}): { flush: () => Promise<void> } {
+}): { flush: () => Promise<void>; forget: (key: string) => void } {
   // What was last written, per entry: with several documents open, going back to one that has not changed
   // must not write it again.
   const written = new Map<string, string>([[d.key(), d.stamp()]]); // the state at the start is not worth saving
   let inflight: Promise<void> | null = null;
   let failing = false;
+  /** Entries whose document was closed: a copy still being written for one of them is removed when it lands. */
+  const forgotten = new Set<string>();
   async function write(key: string, now: string): Promise<void> {
+    // Everything about the document is read before anything is awaited: the person may switch tabs while a big copy is being made
+    // (or while the storage is slow), and the copy must still be of, and describe, the document it was started for.
+    const keep = d.keep();
+    const meta = keep ? d.describe() : null;
+    const unsaved = d.dirty();
+    const saving = keep ? d.save() : null;
+    forgotten.delete(key);
     try {
-      if (d.keep()) {
-        const meta = d.describe();
-        await writeAutosave(key, { blob: await d.save(), savedAt: Date.now(), unsaved: d.dirty(), ...meta });
+      if (saving && meta) {
+        await writeAutosave(key, { blob: await saving, savedAt: Date.now(), unsaved, ...meta });
         // The document may have been closed while the copy was being written. (If it was saved meanwhile, its stamp
         // changed with it, so the next round writes the copy again as saved.)
-        if (!d.keep()) await removeAutosave(key);
+        if (forgotten.has(key)) await removeAutosave(key);
       } else {
         await removeAutosave(key);
       }
@@ -186,5 +194,11 @@ export function startAutosave(d: {
     if (document.visibilityState === 'hidden') now();
   });
   window.addEventListener('pagehide', now);
-  return { flush };
+  return {
+    flush,
+    forget: (key) => {
+      forgotten.add(key);
+      written.delete(key);
+    },
+  };
 }

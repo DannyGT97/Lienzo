@@ -109,8 +109,11 @@ async function inflateRaw(data: Uint8Array, expected: number): Promise<Uint8Arra
   return out;
 }
 
-/** Read the named entries of a ZIP. A damaged or unsupported archive throws an `Error` with a readable message. */
-export async function readZip(bytes: Uint8Array): Promise<ZipEntry[]> {
+/**
+ * Read the named entries of a ZIP (only those `want` accepts, when given: the others are not even decompressed). A damaged or
+ * unsupported archive throws an `Error` with a readable message.
+ */
+export async function readZip(bytes: Uint8Array, want?: (name: string) => boolean): Promise<ZipEntry[]> {
   const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   // The end-of-central-directory record is within the last 64 KB + 22 bytes.
   let eocd = -1;
@@ -141,6 +144,7 @@ export async function readZip(bytes: Uint8Array): Promise<ZipEntry[]> {
     const name = dec.decode(bytes.subarray(at + 46, at + 46 + nlen));
     at += 46 + nlen + elen + clen;
     if (name.endsWith('/')) continue;
+    if (want && !want(name)) continue;
     if (flags & 1) throw new Error('El ZIP está cifrado.');
     if (usize > ZIP_ENTRY_LIMIT) throw new Error(`«${name}» es demasiado grande.`);
     if (local + 30 > bytes.length || dv.getUint32(local, true) !== 0x04034b50) throw new Error('El ZIP está dañado (cabecera de archivo).');

@@ -245,6 +245,11 @@ export async function importClip(bytes: Uint8Array, codecs?: ClipCodecs, options
 
   const seen = new Set<number>();
   const unknownModes = new Set<number>();
+  // One line per kind of notice, with the layers it is about, instead of one line per layer (a big file made a wall of text).
+  const noMask: string[] = [];
+  const otherGrid: string[] = [];
+  const asImage: string[] = [];
+  const noPixels: string[] = [];
   const build = async (first: number, parent: number | null): Promise<void> => {
     // `first` is the BOTTOM child; LayerNextIndex goes up to the next sibling.
     for (let cur: number | null = first; cur !== null && cur > 0 && seen.size <= MAX_LAYERS; ) {
@@ -266,7 +271,7 @@ export async function importClip(bytes: Uint8Array, codecs?: ClipCodecs, options
       const composite = sqlInt(row.LayerComposite) ?? 0;
       if (composite !== 0 && !(folder && composite === 30)) unknownModes.add(composite);
       const o: ClipLayerOrigin = { mainId: cur, name, kind: l.kind, opacity, visibility, clip, composite, externalId: null, stored: false, columns, rows, hashes: new Map(), editable: false };
-      if (sqlInt(row.LayerLayerMaskMipmap)) warnings.push(`"${name}": la máscara de la capa no se importó (se conserva en el archivo).`);
+      if (sqlInt(row.LayerLayerMaskMipmap)) noMask.push(name);
       if (folder) {
         l.through = sqlInt(row.LayerFolderThrough) !== 0;
         const child = sqlInt(row.LayerFirstChildIndex);
@@ -281,16 +286,20 @@ export async function importClip(bytes: Uint8Array, codecs?: ClipCodecs, options
         if (sqlInt(row.DrawColorEnable) !== 0) l.paperColor = [channel(row.DrawColorMainRed), channel(row.DrawColorMainGreen), channel(row.DrawColorMainBlue)];
       } else {
         const full = fullSize(sqlInt(row.LayerRenderMipmap));
-        if (full && type === TYPE_RASTER) {
+        if (full) {
+          // A layer of another type (an image, a vector or text layer…) keeps its drawn picture in the same kind of block set:
+          // it is read and shown, and left alone when saving.
+          const raster = type === TYPE_RASTER;
           o.externalId = full.id;
           o.stored = full.stored;
           o.columns = full.columns;
           o.rows = full.rows;
-          o.editable = full.columns === columns && full.rows === rows;
-          if (!o.editable) warnings.push(`"${name}": su cuadrícula de bloques no coincide con la del lienzo; se lee pero no se reescribirá al guardar.`);
+          o.editable = raster && full.columns === columns && full.rows === rows;
+          if (!raster) asImage.push(name);
+          else if (!o.editable) otherGrid.push(name);
           if (full.stored && options.pixels !== false) await paint(l, o);
         } else {
-          warnings.push(`"${name}": no se encontraron sus píxeles (puede ser una capa vectorial, de texto u otro tipo no admitido); queda vacía aquí y se conserva tal cual en el archivo.`);
+          noPixels.push(name);
         }
       }
       doc.layers.push(l);
@@ -303,6 +312,11 @@ export async function importClip(bytes: Uint8Array, codecs?: ClipCodecs, options
   const first = sqlInt(rootRow?.LayerFirstChildIndex);
   if (first) await build(first, null);
   else warnings.push('No se pudo recorrer el árbol de capas.');
+  const list = (names: string[]): string => `${names.slice(0, 6).map((n) => `"${n}"`).join(', ')}${names.length > 6 ? ` y ${names.length - 6} más` : ''}`;
+  if (noMask.length) warnings.push(`La máscara de estas capas no se importó (se conserva en el archivo): ${list(noMask)}.`);
+  if (asImage.length) warnings.push(`Capas de otro tipo (imagen, vectorial, texto…) leídas como imagen: se ven, pero no se reescribirán al guardar: ${list(asImage)}.`);
+  if (otherGrid.length) warnings.push(`Su cuadrícula de bloques no coincide con la del lienzo: se leen bien, pero no se reescribirán al guardar: ${list(otherGrid)}.`);
+  if (noPixels.length) warnings.push(`Sin píxeles que leer (modelos 3D, texto, vectoriales u otro tipo no admitido): quedan vacías aquí y se conservan tal cual en el archivo: ${list(noPixels)}.`);
   if (unknownModes.size) {
     warnings.push(`Modos de mezcla sin verificar (${[...unknownModes].join(', ')}): se muestran como Normal aquí, pero el archivo conserva el original.`);
   }
@@ -331,4 +345,24 @@ export async function importClip(bytes: Uint8Array, codecs?: ClipCodecs, options
   origin.structure = structureOf(doc);
   if (origin.layers.size) origins.set(doc, origin);
   return { value: doc, warnings };
+}
+
+/**
+ * The preview picture a .clip file carries (PNG bytes), read from its database without building any layer. Null when the file
+ * has none or cannot be read.
+ */
+export function readClipPreview(bytes: Uint8Array): Uint8Array | null {
+  try {
+    const sqlite = parseCsf(bytes).find((c) => c.tag === 'CHNKSQLi');
+    if (!sqlite) return null;
+    const db = new SqliteDb(sqlite.payload);
+    if (!db.has('CanvasPreview')) return null;
+    for (const row of db.rows('CanvasPreview')) {
+      const png = Object.values(row).find((v): v is Uint8Array => v instanceof Uint8Array && v[0] === 0x89 && v[1] === 0x50);
+      if (png) return png;
+    }
+    return null;
+  } catch {
+    return null;
+  }
 }

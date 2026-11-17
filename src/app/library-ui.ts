@@ -4,7 +4,7 @@
  * document. It is shown when the app starts with nothing open and from File ▸ Inicio, and works with the mouse and with a finger
  * (a tap opens, a long press or the ⋯ button gives the menu). Storage is `library-fs.ts`; the lists and names are `library.ts`.
  */
-import { nameOfPath, type FileRef } from './file-io';
+import { nameOfPath, type FileRef, type PickedFile } from './file-io';
 import { allFolders, type LibLocation, type LibraryFs } from './library-fs';
 import {
   FILTERS,
@@ -33,6 +33,7 @@ import {
   type SortKey,
   type TypeFilter,
 } from './library';
+import { pickFolder } from './library-picker';
 import type { Thumbs } from './library-preview';
 import type { RecentFile } from './recent-files';
 import { alertDialog, choiceDialog, confirmDialog, promptDialog } from './ui-dialogs';
@@ -49,7 +50,7 @@ export interface HomeDeps {
   /** The system's own file chooser, for files outside the library. */
   openOutside(): void;
   /** Let the person choose one or several files outside the library; their bytes, to be copied in. Empty when cancelled. */
-  pickOutside(): Promise<{ blob: Blob; name: string }[]>;
+  pickOutside(): Promise<PickedFile[]>;
   /** Hand `blob` to the system's save dialog, to take a document out of the library. */
   exportOutside(blob: Blob, name: string): Promise<void>;
   /** Read a file that is not in the library, for its picture. */
@@ -167,13 +168,64 @@ export function createHome(root: HTMLElement, deps: HomeDeps): Home {
   const scroller = el('div', 'home-scroll');
   const grid = el('div', 'home-grid');
   scroller.append(grid);
-  main.append(bar, pills, scroller);
+  // Android: the library waits in the app's private folder until the person allows access to all files.
+  const access = el('div', 'home-access');
+  access.hidden = true;
+  main.append(access, bar, pills, scroller);
   body.append(side, main);
   const foot = el('footer', 'home-foot');
   const menu = el('div', 'home-menu');
   menu.hidden = true;
   menu.setAttribute('role', 'menu');
   root.append(top, body, foot, menu);
+
+  // Opening a big file freezes the page for a while. Until it is open a message covers the window, so taps cannot start it again
+  // (or open whatever is under the finger) while it is being read.
+  const busy = el('div', 'home-busy');
+  busy.hidden = true;
+  busy.setAttribute('role', 'status');
+  const busyText = el('div', 'home-busy-text');
+  const busyBar = el('div', 'home-busy-bar');
+  const busyFill = el('i');
+  busyBar.append(busyFill);
+  busyBar.hidden = true;
+  let stopWork: (() => void) | null = null;
+  const busyStop = btn('Cancelar', () => {
+    stopWork?.();
+    busyStop.disabled = true;
+    busyStop.textContent = 'Cancelando…';
+  });
+  busyStop.hidden = true;
+  busy.append(busyText, busyBar, busyStop);
+  root.append(busy);
+
+  /** Cover the window with a message that can show progress (`done` of `total`) and a button to stop. */
+  function working(text: string, opts: { total?: number; done?: number; stop?: () => void } = {}): void {
+    busyText.textContent = text;
+    busyBar.hidden = opts.total === undefined;
+    busyFill.style.width = opts.total ? `${Math.min(100, Math.round(((opts.done ?? 0) / opts.total) * 100))}%` : '0%';
+    stopWork = opts.stop ?? null;
+    busyStop.hidden = !opts.stop;
+    if (opts.stop) {
+      busyStop.disabled = false;
+      busyStop.textContent = 'Cancelar';
+    }
+    busy.hidden = false;
+  }
+  let opening = false;
+  async function whileOpening(name: string, run: () => Promise<void>): Promise<void> {
+    if (opening) return;
+    opening = true;
+    working(`Abriendo «${name}»…`);
+    // Let the message be drawn before the heavy work starts.
+    await new Promise<void>((done) => window.setTimeout(done, 60)); // a timer, not a frame: a page that is not shown gets no frames
+    try {
+      await run();
+    } finally {
+      opening = false;
+      busy.hidden = true;
+    }
+  }
 
   // With the side list open over the files (narrow screens), a tap anywhere else only closes it.
   main.addEventListener(
@@ -277,7 +329,7 @@ export function createHome(root: HTMLElement, deps: HomeDeps): Home {
       if (serial !== loadSerial) return;
       items = list;
       folders = tree;
-      if (fs && !location) location = await fs.where().catch(() => null);
+      if (fs && (!location || location.needsAccess)) location = await fs.where().catch(() => null);
     } catch (err) {
       if (serial !== loadSerial) return;
       // The folder vanished (deleted outside the app): fall back to the library itself.
@@ -339,7 +391,7 @@ export function createHome(root: HTMLElement, deps: HomeDeps): Home {
   function folderRow(f: string): HTMLElement {
     const row = el('div', `home-frow${place === f ? ' on' : ''}`);
     row.dataset.rel = f;
-    row.draggable = true;
+    row.draggable = !isTouch();
     row.style.paddingLeft = `${4 + (f.split('/').length - 1) * 14}px`;
     const del = el('button', 'home-del');
     del.type = 'button';
@@ -352,7 +404,10 @@ export function createHome(root: HTMLElement, deps: HomeDeps): Home {
     });
     const name = el('button', 'home-place-name', baseRel(f));
     name.type = 'button';
-    name.addEventListener('click', () => go(f));
+    const touch = touchDrag(row, { rel: f, dir: true, name: baseRel(f) }, (x, y) => openMenu(folderItem(f), x, y));
+    name.addEventListener('click', () => {
+      if (!touch.took()) go(f);
+    });
     row.append(del, name);
     row.addEventListener('dragstart', (e) => startDrag(e, f, true));
     row.addEventListener('dragend', endDrag);
@@ -427,12 +482,17 @@ export function createHome(root: HTMLElement, deps: HomeDeps): Home {
     };
     if (it.rel !== undefined && fs) {
       if (!it.modified && !it.size) return; // missing file
-      void deps.thumbs.get(it.rel, `${it.modified}|${it.size}`, () => fs.read(it.rel!)).then(show);
+      const rel = it.rel;
+      void deps.thumbs.get(rel, `${it.modified}|${it.size}`, () => ({ size: it.size, range: (a, b) => fs.readRange(rel, a, b), all: () => fs.read(rel) })).then(show);
     } else if (it.ref?.kind === 'tauri') {
       const ref = it.ref;
       void deps.stampOf(ref).then((stamp) => {
         if (stamp === null) return;
-        return deps.thumbs.get(`ext:${ref.path}`, String(stamp), () => deps.readRef(ref)).then(show);
+        return deps.thumbs.get(`ext:${ref.path}`, String(stamp), () => {
+          let whole: Promise<Blob> | null = null;
+          const all = (): Promise<Blob> => (whole ??= deps.readRef(ref));
+          return { size: 0, range: async (a, b) => (await all()).slice(a, b), all };
+        }).then(show);
       });
     }
   }
@@ -450,7 +510,15 @@ export function createHome(root: HTMLElement, deps: HomeDeps): Home {
       img.hidden = true;
       img.alt = '';
       img.draggable = false;
+      img.decoding = 'async';
       pic.append(img);
+      // A picture seen before is put in when the card is made, so going out of Inicio and back does not blink.
+      const known = it.rel !== undefined && (it.modified || it.size) ? deps.thumbs.peek(it.rel, `${it.modified}|${it.size}`) : undefined;
+      if (known) {
+        img.src = known;
+        img.hidden = false;
+        c.classList.add('has-thumb');
+      }
     }
     const name = el('div', 'home-name', it.name);
     name.title = it.name;
@@ -484,37 +552,17 @@ export function createHome(root: HTMLElement, deps: HomeDeps): Home {
     text.append(name, meta);
     c.append(pic, text, star, more);
 
-    // A finger taps to open; a mouse selects and opens with a double click (or Enter, or the button at the bottom).
-    let timer = 0;
-    let longPressed = false;
-    let origin = { x: 0, y: 0 };
-    c.addEventListener('pointerdown', (e) => {
-      if (e.pointerType === 'mouse') return;
-      longPressed = false;
-      origin = { x: e.clientX, y: e.clientY };
-      timer = window.setTimeout(() => {
-        longPressed = true;
-        openMenu(it, origin.x, origin.y);
-      }, 500);
-    });
-    const cancel = (): void => window.clearTimeout(timer);
-    c.addEventListener('pointermove', (e) => {
-      if (Math.hypot(e.clientX - origin.x, e.clientY - origin.y) > 10) cancel();
-    });
-    c.addEventListener('pointerup', cancel);
-    c.addEventListener('pointercancel', cancel);
-    c.addEventListener('pointerleave', cancel);
+    // A finger taps to open and holds to lift the item and carry it to a folder (see `touchDrag`); a mouse selects, and opens with a
+    // double click (or Enter, or the button at the bottom).
+    const touch = touchDrag(c, { rel: it.rel, dir: it.dir, name: it.name }, (x, y) => openMenu(it, x, y));
     c.addEventListener('click', () => {
-      if (longPressed) {
-        longPressed = false;
-        return;
-      }
+      if (touch.took()) return;
       if (isTouch()) void act(it, 'open');
       else select(it.key);
     });
-    c.addEventListener('dblclick', () => void act(it, 'open'));
+    if (!isTouch()) c.addEventListener('dblclick', () => void act(it, 'open'));
     if (it.rel !== undefined) {
-      c.draggable = true;
+      c.draggable = !isTouch(); // a finger carries things its own way
       c.addEventListener('dragstart', (e) => startDrag(e, it.rel!, it.dir));
       c.addEventListener('dragend', endDrag);
     }
@@ -584,7 +632,18 @@ export function createHome(root: HTMLElement, deps: HomeDeps): Home {
     if (it) foot.append(btn(it.dir ? 'Abrir carpeta' : 'Abrir', () => void act(it, 'open'), 'primary'));
   }
 
+  function renderAccess(): void {
+    access.replaceChildren();
+    access.hidden = !location?.needsAccess;
+    if (access.hidden) return;
+    access.append(
+      el('span', '', 'Tu biblioteca está en la carpeta privada de la app, que casi ningún explorador deja abrir. Da acceso a los archivos y se mueve entera, con sus carpetas, a Documentos/Lienzo.'),
+      btn('Dar acceso…', () => void fs?.requestAccess?.().catch((err) => alertDialog(message(err), 'No se pudo abrir los ajustes')), 'primary'),
+    );
+  }
+
   function renderAll(): void {
+    renderAccess();
     renderSide();
     renderMain();
     back.hidden = !deps.canReturn();
@@ -665,10 +724,14 @@ export function createHome(root: HTMLElement, deps: HomeDeps): Home {
   }
 
   // The system's own menu (back, save as, inspect…) makes no sense here: right click gives the library's menus.
+  // What last touched the window: a finger that holds makes the system send a "context menu" too, which must not open ours (holding
+  // is for carrying; the menu of a finger is the ⋯ button, or letting go of a hold without moving).
+  let lastPointer = 'mouse';
   root.addEventListener('contextmenu', (e) => {
     const t = e.target as HTMLElement;
     if (t.closest('input, textarea, select')) return;
     e.preventDefault();
+    if (lastPointer === 'touch') return;
     if (t.closest('.home-menu')) return;
     const card = t.closest<HTMLElement>('.home-card');
     if (card) {
@@ -684,6 +747,12 @@ export function createHome(root: HTMLElement, deps: HomeDeps): Home {
   // ---- dragging ----------------------------------------------------------------------------------------
   let drag: { rel: string; dir: boolean } | null = null;
   type Zone = 'before' | 'after' | 'in';
+  /** What the drop logic needs of a pointer: a drag event, or a finger moving. */
+  interface DragPoint {
+    clientY: number;
+    preventDefault(): void;
+    dataTransfer?: DataTransfer | null;
+  }
 
   function startDrag(e: DragEvent, rel: string, dir: boolean): void {
     drag = { rel, dir };
@@ -700,7 +769,7 @@ export function createHome(root: HTMLElement, deps: HomeDeps): Home {
     clearDrop();
   }
   /** Above, below or onto a folder: the top and bottom quarters of a row of the side list sort, the middle puts inside. */
-  function zoneOf(e: DragEvent, row: HTMLElement, target: string): Zone {
+  function zoneOf(e: DragPoint, row: HTMLElement, target: string): Zone {
     if (!drag?.dir || target === '' || !row.classList.contains('home-frow')) return 'in';
     const r = row.getBoundingClientRect();
     const y = (e.clientY - r.top) / Math.max(1, r.height);
@@ -710,7 +779,7 @@ export function createHome(root: HTMLElement, deps: HomeDeps): Home {
     if (!drag || isInside(target, drag.rel)) return false;
     return zone === 'in' ? parentRel(drag.rel) !== target : true;
   }
-  function overTarget(e: DragEvent, row: HTMLElement, target: string): void {
+  function overTarget(e: DragPoint, row: HTMLElement, target: string): void {
     const zone = zoneOf(e, row, target);
     clearDrop();
     if (!dropAllowed(target, zone)) return;
@@ -718,7 +787,7 @@ export function createHome(root: HTMLElement, deps: HomeDeps): Home {
     if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
     row.classList.add(`drop-${zone}`);
   }
-  async function dropTarget(e: DragEvent, row: HTMLElement, target: string): Promise<void> {
+  async function dropTarget(e: DragPoint, row: HTMLElement, target: string): Promise<void> {
     const zone = zoneOf(e, row, target);
     const d = drag;
     const allowed = dropAllowed(target, zone);
@@ -746,6 +815,124 @@ export function createHome(root: HTMLElement, deps: HomeDeps): Home {
       refreshSoon();
     }
   }
+  // A finger cannot use the browser's own drag and drop, so holding is the gesture: after a moment the item lifts (it follows the
+  // finger and the folder under it lights up); letting go over a folder moves it there, letting go without having moved opens its menu.
+  let touching = false;
+  document.addEventListener(
+    'touchmove',
+    (e) => {
+      if (touching && e.cancelable) e.preventDefault(); // the page must not scroll while something is being carried
+    },
+    { passive: false },
+  );
+
+  function touchDrag(target: HTMLElement, who: { rel?: string; dir: boolean; name: string }, menuAt: (x: number, y: number) => void): { took(): boolean } {
+    let timer = 0;
+    let scrollTimer = 0;
+    let active = false;
+    let took = false;
+    let moved = false;
+    let start = { x: 0, y: 0 };
+    let last = { x: 0, y: 0 };
+    let ghost: HTMLElement | null = null;
+    let hover: { row: HTMLElement; rel: string } | null = null;
+
+    /** The folder under the finger, if one can take what is carried. */
+    function track(): void {
+      const under = document.elementFromPoint(last.x, last.y) as HTMLElement | null;
+      clearDrop();
+      hover = null;
+      if (!under || !drag) return;
+      const card = under.closest<HTMLElement>('.home-card.dir');
+      const row = card ?? under.closest<HTMLElement>('.home-side [data-rel]');
+      const rel = card ? byKey.get(card.dataset.key ?? '')?.rel : row?.dataset.rel;
+      if (!row || rel === undefined) return;
+      overTarget({ clientY: last.y, preventDefault() {} }, row, rel);
+      if (/\bdrop-(before|after|in)\b/.test(row.className)) hover = { row, rel };
+    }
+    /** Near the top or bottom of a list the list scrolls by itself, so far-away folders can be reached. */
+    function autoScroll(): void {
+      const area = (document.elementFromPoint(last.x, last.y) as HTMLElement | null)?.closest<HTMLElement>('.home-scroll, .home-side');
+      if (!area) return;
+      const r = area.getBoundingClientRect();
+      if (last.y < r.top + 56) area.scrollTop -= 16;
+      else if (last.y > r.bottom - 56) area.scrollTop += 16;
+      else return;
+      track();
+    }
+    function clean(): void {
+      window.clearTimeout(timer);
+      window.clearInterval(scrollTimer);
+      ghost?.remove();
+      ghost = null;
+      target.classList.remove('lifted');
+      if (active) {
+        touching = false;
+        endDrag();
+      }
+      active = false;
+      hover = null;
+    }
+
+    target.addEventListener('pointerdown', (e) => {
+      if (e.pointerType === 'mouse') return;
+      took = false;
+      moved = false;
+      start = last = { x: e.clientX, y: e.clientY };
+      window.clearTimeout(timer);
+      timer = window.setTimeout(() => {
+        active = true;
+        touching = true;
+        took = true;
+        navigator.vibrate?.(18);
+        if (who.rel !== undefined) drag = { rel: who.rel, dir: who.dir };
+        try {
+          target.setPointerCapture(e.pointerId);
+        } catch {
+          // the finger already left
+        }
+        target.classList.add('lifted');
+        ghost = el('div', 'home-ghost', who.name);
+        ghost.style.left = `${last.x}px`;
+        ghost.style.top = `${last.y}px`;
+        root.append(ghost);
+        scrollTimer = window.setInterval(autoScroll, 40);
+      }, 380);
+    });
+    target.addEventListener('pointermove', (e) => {
+      last = { x: e.clientX, y: e.clientY };
+      if (!active) {
+        if (Math.hypot(last.x - start.x, last.y - start.y) > 10) window.clearTimeout(timer); // it is a scroll, not a hold
+        return;
+      }
+      if (Math.hypot(last.x - start.x, last.y - start.y) > 12) moved = true;
+      if (ghost) {
+        ghost.style.left = `${last.x}px`;
+        ghost.style.top = `${last.y}px`;
+      }
+      track();
+    });
+    // The drop needs what is carried, so it is started before the state is cleaned.
+    const finish = (e: PointerEvent, cancelled: boolean): void => {
+      window.clearTimeout(timer);
+      if (!active) return;
+      const aim = hover;
+      const point: DragPoint = { clientY: e.clientY, preventDefault() {} };
+      if (!cancelled && aim && drag && moved) void dropTarget(point, aim.row, aim.rel);
+      else if (!cancelled && !moved) menuAt(last.x, last.y);
+      clean();
+    };
+    target.addEventListener('pointerup', (e) => finish(e, false));
+    target.addEventListener('pointercancel', (e) => finish(e, true));
+    return {
+      took() {
+        const v = took;
+        took = false;
+        return v;
+      },
+    };
+  }
+
   side.addEventListener('dragover', (e) => {
     const row = (e.target as HTMLElement).closest<HTMLElement>('[data-rel]');
     if (row && row.dataset.rel !== undefined) overTarget(e, row, row.dataset.rel);
@@ -759,6 +946,7 @@ export function createHome(root: HTMLElement, deps: HomeDeps): Home {
   });
 
   root.addEventListener('pointerdown', (e) => {
+    lastPointer = e.pointerType;
     if (!menu.hidden && !menu.contains(e.target as Node)) closeMenu();
   });
   root.addEventListener('keydown', (e) => {
@@ -777,10 +965,13 @@ export function createHome(root: HTMLElement, deps: HomeDeps): Home {
     const sep = location.path.includes('\\') ? '\\' : '/';
     const here = inFolder() && place ? `${location.path}${sep}${place.split('/').join(sep)}` : location.path;
     const android = /Android/i.test(navigator.userAgent);
+    const privateFolder = location.path.includes('Android/data');
     const text = !fs || fs.backend === 'opfs'
       ? `Estás en el navegador: las carpetas se guardan en el almacenamiento privado de la página, solo para pruebas.\n\n${here}`
-      : android
-        ? `Tus carpetas y documentos están en la memoria del dispositivo, en la carpeta de la app:\n\n${here}\n\nEs una carpeta de Lienzo: si desinstalas la app, Android la borra. Según tu versión de Android, el explorador de archivos puede no dejarte entrar en «Android/data»; con un cable USB al ordenador sí suele verse. Para sacar un documento a otro sitio usa «Exportar a…» en su menú (⋯).`
+      : android && !privateFolder
+        ? `Tus carpetas y documentos están en la memoria del dispositivo, en:\n\n${here}\n\nEs una carpeta normal de Documentos: la ves desde cualquier explorador de archivos (junto a la de Clip Studio), puedes copiar documentos dentro o llevártelos, y se conserva si desinstalas Lienzo.`
+        : android
+          ? `Tus carpetas y documentos están en la memoria del dispositivo, en la carpeta de la app:\n\n${here}\n\nEs una carpeta de Lienzo: si desinstalas la app, Android la borra. Según tu versión de Android, el explorador de archivos puede no dejarte entrar en «Android/data»; con un cable USB al ordenador sí suele verse. Para sacar un documento a otro sitio usa «Exportar a…» en su menú (⋯).`
         : `Tus carpetas y documentos son archivos normales de tu equipo, en:\n\n${here}\n\nPuedes abrir esa carpeta con el explorador de archivos, copiar documentos dentro o llevártelos a otro sitio.`;
     const options: { label: string; value: 'open' | 'copy' | null; primary?: boolean }[] = [];
     if (location.reveal && fs.reveal) options.push({ label: 'Abrir en el explorador', value: 'open', primary: true });
@@ -805,27 +996,41 @@ export function createHome(root: HTMLElement, deps: HomeDeps): Home {
     return (await siblings(parentRel(rel))).some((n) => n.toLowerCase() === baseRel(rel).toLowerCase());
   }
 
-  async function newFolder(inside: string): Promise<void> {
-    if (!fs) return;
+  /** Ask for a name and make the folder inside `inside`; its path, or null when nothing was made (the person was told why). */
+  async function makeFolder(inside: string): Promise<string | null> {
+    if (!fs) return null;
     const asked = await promptDialog(`Nombre de la carpeta nueva (${inside ? `dentro de «${baseRel(inside)}»` : 'en la raíz de la biblioteca'}):`, 'Nueva carpeta');
-    if (asked === null) return;
+    if (asked === null) return null;
     const name = asked.trim();
     const bad = nameProblem(name);
-    if (bad) return void alertDialog(bad, 'No se pudo crear la carpeta');
+    if (bad) {
+      void alertDialog(bad, 'No se pudo crear la carpeta');
+      return null;
+    }
     try {
       const rel = joinRel(inside, name);
-      if (await exists(rel)) return void alertDialog(`Ya hay algo llamado «${name}» ahí.`, 'No se pudo crear la carpeta');
-      await fs.mkdir(rel);
-      if (place !== inside) {
-        place = inside;
-        prefs.place = inside;
-        savePrefs();
+      if (await exists(rel)) {
+        void alertDialog(`Ya hay algo llamado «${name}» ahí.`, 'No se pudo crear la carpeta');
+        return null;
       }
-      selected = `lib:${rel}`;
-      await load();
+      await fs.mkdir(rel);
+      return rel;
     } catch (err) {
       void alertDialog(message(err), 'No se pudo crear la carpeta');
+      return null;
     }
+  }
+
+  async function newFolder(inside: string): Promise<void> {
+    const rel = await makeFolder(inside);
+    if (rel === null) return;
+    if (place !== inside) {
+      place = inside;
+      prefs.place = inside;
+      savePrefs();
+    }
+    selected = `lib:${rel}`;
+    await load();
   }
 
   async function importHere(): Promise<void> {
@@ -836,34 +1041,58 @@ export function createHome(root: HTMLElement, deps: HomeDeps): Home {
       if (!picked.length) return;
       const taken = await siblings(into);
       let done = 0;
+      let stopped = false;
       const problems: string[] = [];
-      for (const file of picked) {
-        if (!fileKind(file.name)) {
-          problems.push(`«${file.name}»: no es un formato que Lienzo pueda abrir.`);
-          continue;
-        }
+      for (let i = 0; i < picked.length; i++) {
+        if (stopped) break;
+        // Each file is read, written and counted in turn; the message says which one and how far along (a long list otherwise
+        // looks as if nothing is happening), and "Cancelar" stops after the current file.
+        working(`Importando ${i + 1} de ${picked.length}…`, { total: picked.length, done: i, stop: () => (stopped = true) });
+        await new Promise<void>((next) => window.setTimeout(next, 0)); // let the bar be drawn between files
+        let label = '';
         try {
+          const file = await picked[i]!();
+          label = file.name;
+          working(`Importando ${i + 1} de ${picked.length}: ${file.name}`, { total: picked.length, done: i, stop: () => (stopped = true) });
+          if (!fileKind(file.name)) {
+            problems.push(`«${file.name}»: no es un formato que Lienzo pueda abrir.`);
+            continue;
+          }
           const name = uniqueName(file.name, taken);
           await fs.write(joinRel(into, name), file.blob);
           taken.push(name);
           done++;
         } catch (err) {
-          problems.push(`«${file.name}»: ${message(err)}`);
+          problems.push(`«${label || `archivo ${i + 1}`}»: ${message(err)}`);
         }
       }
+      busy.hidden = true;
       if (place === RECENT || place === FAV) go(into);
       else await load();
-      if (problems.length) void alertDialog(`${done ? `Se importaron ${done} de ${picked.length}. ` : ''}No se pudo importar:\n${problems.join('\n')}`, 'Importar');
+      if (problems.length || stopped) {
+        const head = stopped ? `Importación cancelada: se importaron ${done} de ${picked.length}.` : done ? `Se importaron ${done} de ${picked.length}.` : '';
+        void alertDialog(`${[head, problems.length ? `No se pudo importar:\n${problems.join('\n')}` : ''].filter(Boolean).join('\n')}`, 'Importar');
+      }
     } catch (err) {
+      busy.hidden = true;
       void alertDialog(message(err), 'No se pudo importar');
     }
   }
 
-  async function chooseFolder(question: string, hide: string | null = null): Promise<string | null> {
-    if (!fs) return null;
-    const all = (await allFolders(fs, '', 6)).filter((f) => hide === null || !isInside(f, hide));
-    const options = all.map((f) => ({ label: f ? `${'· '.repeat(f.split('/').length - 1)}${baseRel(f)}` : 'Biblioteca', value: f as string | null }));
-    return choiceDialog<string | null>(question, options, null, true);
+  /**
+   * Ask for a folder in the window of `library-picker.ts`. `inside` (a folder being moved) and what is in it cannot be chosen,
+   * nor `here` (where the thing already is); a window without those just lists every folder.
+   */
+  function chooseFolder(o: { title: string; message?: string; confirm: string; inside?: string; here?: string }): Promise<string | null> {
+    if (!fs) return Promise.resolve(null);
+    return pickFolder({
+      title: o.title,
+      message: o.message,
+      confirmLabel: o.confirm,
+      load: () => allFolders(fs, '', 8, (parent, names) => arrange(names, prefs.order[parent])),
+      blocked: (f) => (o.inside !== undefined && isInside(f, o.inside) ? (f === o.inside ? 'Es la carpeta que mueves' : 'Está dentro de lo que se mueve') : f === o.here ? 'Ya está aquí' : null),
+      create: (parent) => makeFolder(parent),
+    });
   }
 
   async function act(it: Item, action: string): Promise<void> {
@@ -876,9 +1105,9 @@ export function createHome(root: HTMLElement, deps: HomeDeps): Home {
             if (await confirmDialog(`«${it.name}» ya no está en la biblioteca. ¿Quitarlo de la lista?`, 'Quitar')) await deps.forgetRecent(libRef(it));
             return refreshSoon();
           }
-          return void (await deps.open(libRef(it)));
+          return void (await whileOpening(it.name, () => deps.open(libRef(it))));
         }
-        if (it.ref) return void (await deps.open(it.ref));
+        if (it.ref) return void (await whileOpening(it.name, () => deps.open(it.ref!)));
         return;
       }
       if (action === 'fav') {
@@ -943,7 +1172,7 @@ export function createHome(root: HTMLElement, deps: HomeDeps): Home {
         return after(rel, to);
       }
       if (action === 'move') {
-        const dest = await chooseFolder(`¿A qué carpeta quieres mover «${it.name}»?`, it.dir ? rel : null);
+        const dest = await chooseFolder({ title: `Mover «${it.name}»`, message: 'Elige la carpeta de destino.', confirm: 'Mover aquí', inside: it.dir ? rel : undefined, here: parentRel(rel) });
         if (dest === null || dest === parentRel(rel)) return;
         const to = joinRel(dest, it.name);
         if (await exists(to)) return void alertDialog(`Ya hay algo llamado «${it.name}» en esa carpeta.`, 'No se pudo mover');
@@ -983,6 +1212,13 @@ export function createHome(root: HTMLElement, deps: HomeDeps): Home {
     refreshSoon();
   }
 
+  // Back from the system's page where access to all files is allowed: the library is looked for again (and moved, the first time).
+  document.addEventListener('visibilitychange', () => {
+    if (!visible || document.visibilityState !== 'visible' || !location?.needsAccess) return;
+    location = null;
+    void load();
+  });
+
   return {
     get visible() {
       return visible;
@@ -992,6 +1228,7 @@ export function createHome(root: HTMLElement, deps: HomeDeps): Home {
       root.hidden = false;
       back.hidden = !deps.canReturn();
       if (!fs && place !== RECENT && place !== FAV) place = RECENT;
+      if (items.length) renderAll(); // what was shown before comes back at once; the fresh list replaces it a moment later
       void load();
       queueMicrotask(() => root.focus({ preventScroll: true }));
     },
@@ -1004,7 +1241,7 @@ export function createHome(root: HTMLElement, deps: HomeDeps): Home {
     refresh() {
       if (visible) refreshSoon();
     },
-    chooseFolder: (q) => chooseFolder(q),
+    chooseFolder: (q) => chooseFolder({ title: 'Guardar en la biblioteca', message: q, confirm: 'Guardar aquí' }),
     exists,
   };
 }

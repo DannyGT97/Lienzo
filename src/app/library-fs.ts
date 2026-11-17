@@ -12,6 +12,8 @@ export interface LibLocation {
   visible: boolean;
   /** The system's file explorer can be opened on it. */
   reveal: boolean;
+  /** Android: the library is still in the app's private folder; allowing access to all files moves it to Documents/Lienzo. */
+  needsAccess?: boolean;
 }
 
 export interface LibraryFs {
@@ -20,6 +22,8 @@ export interface LibraryFs {
   where(): Promise<LibLocation>;
   /** Open the system's file explorer on a folder (or the folder holding a file). */
   reveal?(rel: string): Promise<void>;
+  /** Android: open the page where the person allows access to all files, so the library can live in Documents/Lienzo. */
+  requestAccess?(): Promise<void>;
   list(rel: string): Promise<LibEntry[]>;
   mkdir(rel: string): Promise<void>;
   /** Rename or move a file or folder; fails when the target exists. */
@@ -28,6 +32,8 @@ export interface LibraryFs {
   copy(from: string, to: string): Promise<void>;
   remove(rel: string): Promise<void>;
   read(rel: string): Promise<Blob>;
+  /** Bytes `start` to `end` of a file, without reading the rest (for the pictures of a folder of big documents). */
+  readRange(rel: string, start: number, end: number): Promise<Blob>;
   write(rel: string, data: Blob): Promise<void>;
 }
 
@@ -61,6 +67,7 @@ function nativeFs(): LibraryFs {
     backend: 'native',
     where: () => call<LibLocation>('library_info'),
     reveal: (rel) => call('library_reveal', { rel }),
+    requestAccess: () => call('library_request_access'),
     async list(rel) {
       const items = await call<{ name: string; dir: boolean; size: number; modified: number }[]>('library_list', { rel });
       return items.map((e) => ({ ...e, rel: joinRel(rel, e.name) }));
@@ -71,6 +78,9 @@ function nativeFs(): LibraryFs {
     remove: (rel) => call('library_remove', { rel }),
     async read(rel) {
       return new Blob([await call<ArrayBuffer>('library_read', { rel })]);
+    },
+    async readRange(rel, start, end) {
+      return new Blob([await call<ArrayBuffer>('library_read_range', { rel, start, end })]);
     },
     async write(rel, data) {
       await call('library_write', { rel, data: await toBase64(data) });
@@ -151,6 +161,9 @@ function opfsFs(): LibraryFs {
     },
     async read(rel) {
       return (await fileAt(rel)).getFile();
+    },
+    async readRange(rel, start, end) {
+      return (await (await fileAt(rel)).getFile()).slice(start, end);
     },
     async write(rel, data) {
       const out = await (await fileAt(rel, true)).createWritable();

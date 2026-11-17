@@ -94,13 +94,15 @@ import { armStaticPalettes } from '../ui/collapsible';
 import { createSelectionUi, isFillTool, isSelectionTool } from './selection-ui';
 import { listAutosaves, newAutosaveKey, removeAutosave, startAutosave, trimAutosaves, type StoredAutosave } from './autosave';
 import { hasUnsavedChanges, judgeCopy, planRestore, readSession, writeSession } from './session-state';
-import { chooseSaveTarget, dialogReportsType, filePlatform, hasPicker, modifiedAt, openFile, openFiles, readFrom, readKnownFile, saveAs as saveAsOutside, saveTo, writeToTarget, type FileFilter, type FileRef, type SaveTarget } from './file-io';
+import { chooseSaveTarget, dialogReportsType, filePlatform, hasPicker, modifiedAt, openFile, openFiles, readFrom, readKnownFile, saveAs as saveAsOutside, saveTo, writeToTarget, type FileFilter, type FileRef, type PickedFile, type SaveTarget } from './file-io';
 import { openUpdatesWindow } from './updates-window';
 import { checkForUpdates, currentVersion, findUpdate, updatesAvailable } from './updates';
 import { loadRecent, mergeRecent, relocateRecent, sameFile, storeRecent, withoutRecent, type RecentFile } from './recent-files';
 import { createHome } from './library-ui';
+import { encodePng } from '../engine/png-encode';
+import { aboutLines, pageVersion, versionLabel, type BuildInfo } from './about';
 import { libraryFs } from './library-fs';
-import { createPreviewer, createThumbs } from './library-preview';
+import { createPreviewer, createThumbs, previewPng } from './library-preview';
 import { joinRel, uniqueName } from './library';
 import { createSaveFlow } from './save-flow';
 import { deniedNotice, failedNotice, savedNotice, type NoticeText, type SaveStep, type SavedResult } from './save-notice';
@@ -2225,15 +2227,8 @@ const NEW_FILE_FORMATS: SaveFormat[] = ['lienzo', 'psd', 'psb', 'ora'];
 
 /** PNG through the browser's own codec, for the formats that carry one PNG per layer. */
 const pngCodecs: OraCodecs = {
-  async encodePng(width, height, rgba) {
-    const c = document.createElement('canvas');
-    c.width = width;
-    c.height = height;
-    c.getContext('2d')!.putImageData(new ImageData(rgba, width, height), 0, 0);
-    const blob = await new Promise<Blob | null>((done) => c.toBlob(done, 'image/png'));
-    if (!blob) throw new Error('No se pudo crear una imagen PNG.');
-    return new Uint8Array(await blob.arrayBuffer());
-  },
+  // Not through a canvas: its toBlob waits for idle time, which a window that keeps drawing never has (see png-encode.ts).
+  encodePng: (width, height, rgba) => encodePng(width, height, rgba),
   async decodePng(bytes) {
     return drawable(await createImageBitmap(new Blob([bytes as BlobPart], { type: 'image/png' })));
   },
@@ -2254,7 +2249,7 @@ async function encodeAs(kind: SaveKind, format: SaveFormat): Promise<{ blob: Blo
   }
   switch (format) {
     case 'lienzo':
-      return { blob: await saveLienzo(doc), warnings: [] };
+      return { blob: await saveLienzo(doc, { preview: () => previewPng(doc) }), warnings: [] };
     case 'clip': {
       // Edits a copy of the .clip the document was opened from (see clip-write.ts).
       const { value, warnings } = await exportClip(doc, { ...pngCodecs, loadSql });
@@ -2386,7 +2381,9 @@ async function settleOpenDocument(): Promise<void> {
   canvasResize.close();
   if (transformUi.active) transformUi.fix();
   if (adjustUi.active) adjustUi.close(false);
-  await autosave.flush();
+  // The copy is written (a big page takes seconds on a tablet), but a tab is never kept waiting for it for long: if the storage is
+  // slow or stuck, the switch goes ahead and the copy lands when it can. Without this limit one slow copy froze every tab.
+  await Promise.race([autosave.flush(), new Promise<void>((done) => window.setTimeout(done, 1500))]);
 }
 
 let switching = false;
@@ -2475,11 +2472,11 @@ async function closeTab(id: number): Promise<void> {
   const entry = (): DocSession => sessionOf(id)!;
   const dirty = id === activeSessionId ? isDirty() : sessionDirty(entry());
   if (dirty) {
-    // The question and the save are about the open document, so that one is brought up first.
-    await switchTo(id);
-    if (activeSessionId !== id) return;
+    // The question is asked first, about the tab that is closing, without leaving the open one: leaving it means writing its
+    // autosave copy, which takes seconds on a big page, and "No guardar" or "Cancelar" never needed that.
+    const title = id === activeSessionId ? docTitle : entry().title;
     const choice = await choiceDialog<'save' | 'drop' | 'cancel'>(
-      `«${docTitle}» tiene cambios sin guardar. ¿Quieres guardarlos antes de cerrarlo?`,
+      `«${title}» tiene cambios sin guardar. ¿Quieres guardarlos antes de cerrarlo?`,
       [
         { label: 'Guardar', value: 'save', primary: true },
         { label: 'No guardar', value: 'drop' },
@@ -2487,20 +2484,29 @@ async function closeTab(id: number): Promise<void> {
       ],
       'cancel',
     );
-    if (choice === 'save') await saveFlow.save();
-    if (choice === 'cancel' || (choice === 'save' && isDirty())) {
-      if (origin !== id) await switchTo(origin);
-      return;
+    if (choice === 'cancel' || !sessionOf(id)) return;
+    if (choice === 'save') {
+      // Saving works on the open document, so this one is brought up for it.
+      await switchTo(id);
+      if (activeSessionId !== id) return;
+      await saveFlow.save();
+      if (isDirty()) {
+        if (origin !== id) await switchTo(origin);
+        return;
+      }
     }
   }
   if (!sessionOf(id)) return;
   // Back to the tab that was open when this one was asked to close; if this was the open one, the one beside it.
   const next = activeAfterClose(sessions.map((s) => s.id), id, origin);
   const closing = id === activeSessionId;
-  void removeAutosave(closing ? autosaveKey : entry().autosaveKey).catch(() => undefined);
+  const closedKey = closing ? autosaveKey : entry().autosaveKey;
+  autosave.forget(closedKey);
+  void removeAutosave(closedKey).catch(() => undefined);
   sessions.splice(sessions.findIndex((s) => s.id === id), 1);
   if (!closing) {
     persistSession();
+    updateStatusBar(); // the tab strip is drawn from here
     return;
   }
   const target = next === null ? undefined : sessionOf(next);
@@ -2679,6 +2685,14 @@ const openRecent = async (n: number): Promise<void> => void (recent[n] && (await
 
 /** Open a file the app knew before (a recent one, or one of the library); when it cannot be read the person may drop it from the list. */
 async function openRef(ref: FileRef): Promise<void> {
+  // A file that is already open in a tab is shown, not opened a second time.
+  const tabs = [{ id: activeSessionId, file: docFile }, ...sessions.filter((s) => s.id !== activeSessionId).map((s) => ({ id: s.id, file: s.file }))];
+  for (const t of tabs) {
+    if (!t.file || !(await sameFile(t.file, ref))) continue;
+    if (t.id !== activeSessionId) await switchTo(t.id);
+    hideHome();
+    return;
+  }
   let blob: Blob;
   try {
     blob = await readKnownFile(ref);
@@ -2704,14 +2718,14 @@ async function openFlow(): Promise<void> {
 }
 
 // ---- home screen: the file explorer shown at start and from File ▸ Inicio ---------------------------------------
-const pickOutside = async (): Promise<{ blob: Blob; name: string }[]> => {
+const pickOutside = async (): Promise<PickedFile[]> => {
   if (hasPicker()) return (await openFiles(OPEN_FILTERS)) ?? [];
   return new Promise((done) => {
     const i = document.createElement('input');
     i.type = 'file';
     i.multiple = true;
     i.accept = IMAGE_ACCEPT;
-    i.addEventListener('change', () => done([...(i.files ?? [])].map((f) => ({ blob: f, name: f.name }))));
+    i.addEventListener('change', () => done([...(i.files ?? [])].map((f): PickedFile => async () => ({ blob: f, name: f.name }))));
     i.addEventListener('cancel', () => done([]));
     i.click();
   });
@@ -4072,7 +4086,10 @@ commands.register('applicationshortcutsetting', () => void openShortcutSettings(
 commands.register('helpupdates', () =>
   checkForUpdates({
     available: updatesAvailable,
-    version: currentVersion,
+    version: async () => {
+      const { version, build } = await buildDetails();
+      return versionLabel(version, build);
+    },
     find: findUpdate,
     window: openUpdatesWindow,
     beforeInstall: () => autosave.flush(),
@@ -4099,12 +4116,17 @@ commands.register('layerdetailsettings', () => {
 });
 commands.register('helpperformance', openDiagnostics);
 commands.register('helpprofile', { run: () => setProfiling(perfPanel.hidden), checked: () => !perfPanel.hidden });
-commands.register('applicationabout', () =>
-  alertDialog(
-    'Lienzo: editor de dibujo y manga (prototipo).\nMotor propio por teselas con compositor WebGL.\nLa interfaz se está recreando por fases; lo que aún no funciona aparece desactivado.',
-    'Acerca de Lienzo',
-  ),
-);
+/** The kind of build (official or test) and the version, as the native side knows them; null in a browser. */
+async function buildDetails(): Promise<{ version: string; build: BuildInfo | null }> {
+  if (!updatesAvailable()) return { version: pageVersion(), build: null };
+  const { invoke } = await import('@tauri-apps/api/core');
+  const [version, build] = await Promise.all([currentVersion(), invoke<BuildInfo>('build_info').catch(() => null)]);
+  return { version, build };
+}
+commands.register('applicationabout', async () => {
+  const { version, build } = await buildDetails();
+  await alertDialog(aboutLines(version, build).join('\n'), 'Acerca de Lienzo');
+});
 
 // Shortcuts shown in the menus (plus their aliases) work for every live command.
 const collect = (items: MenuEntry[]): void => {
@@ -4485,6 +4507,12 @@ mountLayoutResizers();
   setBrushSize,
   refreshUi,
   render,
+  /** For measuring on a device (scripts/device-tests): saves the open document as a file would, and says how long it took. */
+  async timeSave(withPreview = true): Promise<{ ms: number; bytes: number }> {
+    const t0 = performance.now();
+    const blob = await saveLienzo(doc, withPreview ? { preview: () => previewPng(doc) } : {});
+    return { ms: Math.round(performance.now() - t0), bytes: blob.size };
+  },
   applyView,
   resizeSurfaces,
   layersUi,
@@ -4519,6 +4547,8 @@ const autosave = startAutosave({
   everyMs: () => (prefs.autosave ? prefs.autosaveMinutes * 60_000 : null),
 });
 void restoreSession();
+// Should finding out take far too long, the cover is not left in the way.
+window.setTimeout(() => document.getElementById('boot')?.remove(), 15_000);
 
 /**
  * Open a stored copy as a tab again, tied to its file when it has one. The copy keeps being written to the same entry.
@@ -4636,12 +4666,14 @@ async function restoreSession(): Promise<void> {
     if (behind.length) setStatus(`${behind.map((n) => `«${n}»`).join(', ')} cambió fuera de Lienzo y no se reabrió. Ábrelo de nuevo desde el archivo.`);
     restoringSession = false;
     persistSession();
+    document.getElementById('boot')?.remove();
     await offerRecovery([...diverged, ...plan.orphans], new Set(diverged.map((s) => s.key)));
   } catch (err) {
     setStatus(`No se pudo restaurar la sesión: ${err instanceof Error ? err.message : String(err)}`);
   } finally {
     restoringSession = false;
     persistSession();
+    document.getElementById('boot')?.remove();
   }
 }
 

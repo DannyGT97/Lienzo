@@ -178,6 +178,11 @@ export class TiledSurface {
     return out;
   }
 
+  /** Put keys back among the changed ones: a renderer that took them and could not use them yet asks for them again later. */
+  redirty(keys: readonly number[]): void {
+    for (const k of keys) this.dirty.add(k);
+  }
+
   markAllDirty(): void {
     for (const k of this.tiles.keys()) this.mark(k);
   }

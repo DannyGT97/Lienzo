@@ -81,7 +81,16 @@ interface Metadata {
   rulers?: Ruler[];
   nextRulerId?: number;
   layers: LayerRecord[];
+  /** A small picture of the page (PNG, base64), so a file explorer can show the document without reading all of it. */
+  preview?: string;
 }
+
+/**
+ * How many tiles are being compressed or decompressed at the same time. The work runs off the main thread, but one tile at a time
+ * each one waits for the previous to finish: a page of thousands of tiles took tens of seconds on a tablet. A batch keeps the
+ * compressor busy, and the results are still put in order.
+ */
+const PARALLEL = 16;
 
 async function pack(data: Uint8ClampedArray): Promise<Uint8Array> {
   const stream = new CompressionStream('deflate-raw');
@@ -100,17 +109,34 @@ async function unpack(data: ArrayBuffer): Promise<Uint8Array> {
 }
 
 /** Write a document to a `.lienzo` file. */
-export async function saveLienzo(doc: Document): Promise<Blob> {
+export interface SaveOptions {
+  /** Makes the small picture kept inside the file (PNG bytes), or null when there is none. Left out by autosave, which saves often. */
+  preview?: () => Promise<Uint8Array | null>;
+}
+
+const toBase64 = (bytes: Uint8Array): string => {
+  let out = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) out += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return btoa(out);
+};
+const fromBase64 = (text: string): Uint8Array => Uint8Array.from(atob(text), (c) => c.charCodeAt(0));
+
+export async function saveLienzo(doc: Document, opts: SaveOptions = {}): Promise<Blob> {
   const parts: Uint8Array[] = [];
   let offset = 0;
   const refs = async (s: TiledSurface | undefined): Promise<TileRef[]> => {
     const out: TileRef[] = [];
     if (!s) return out;
-    for (const [tx, ty, tile] of s.entries()) {
-      const z = await pack(tile);
-      parts.push(z);
-      out.push([tx, ty, offset, z.length]);
-      offset += z.length;
+    const all = [...s.entries()];
+    for (let i = 0; i < all.length; i += PARALLEL) {
+      const batch = all.slice(i, i + PARALLEL);
+      const packed = await Promise.all(batch.map(([, , tile]) => pack(tile)));
+      batch.forEach(([tx, ty], j) => {
+        const z = packed[j]!;
+        parts.push(z);
+        out.push([tx, ty, offset, z.length]);
+        offset += z.length;
+      });
     }
     return out;
   };
@@ -170,6 +196,8 @@ export async function saveLienzo(doc: Document): Promise<Blob> {
     nextRulerId: doc.nextRulerId,
     layers,
   };
+  const picture = opts.preview ? await opts.preview().catch(() => null) : null;
+  if (picture) meta.preview = toBase64(picture);
   const json = new TextEncoder().encode(JSON.stringify(meta));
   const head = new Uint8Array(HEADER);
   head.set(MAGIC);
@@ -213,13 +241,23 @@ export async function loadLienzo(src: Blob): Promise<Document> {
     } catch {
       throw new Error(CORRUPT);
     }
-    for (const [tx, ty, offset, length] of tiles) {
-      if (!stored.inGrid(tx, ty) || !Number.isInteger(offset) || !Number.isInteger(length) || offset < 0 || length < 0 || dataStart + offset + length > src.size) throw new Error(CORRUPT);
-      const raw = await unpack(await src.slice(dataStart + offset, dataStart + offset + length).arrayBuffer()).catch(() => {
-        throw new Error(CORRUPT);
+    for (let i = 0; i < tiles.length; i += PARALLEL) {
+      const batch = tiles.slice(i, i + PARALLEL);
+      for (const [tx, ty, offset, length] of batch) {
+        if (!stored.inGrid(tx, ty) || !Number.isInteger(offset) || !Number.isInteger(length) || offset < 0 || length < 0 || dataStart + offset + length > src.size) throw new Error(CORRUPT);
+      }
+      const raws = await Promise.all(
+        batch.map(async ([, , offset, length]) =>
+          unpack(await src.slice(dataStart + offset, dataStart + offset + length).arrayBuffer()).catch(() => {
+            throw new Error(CORRUPT);
+          }),
+        ),
+      );
+      batch.forEach(([tx, ty], j) => {
+        const raw = raws[j]!;
+        if (raw.length !== stored.blockBytes) throw new Error(CORRUPT);
+        stored.put(tx, ty, new Uint8ClampedArray(raw.buffer, raw.byteOffset, raw.length));
       });
-      if (raw.length !== stored.blockBytes) throw new Error(CORRUPT);
-      stored.put(tx, ty, new Uint8ClampedArray(raw.buffer, raw.byteOffset, raw.length));
     }
     return size === TILE ? stored : stored.reblock(TILE);
   };
@@ -266,4 +304,22 @@ export async function loadLienzo(src: Blob): Promise<Document> {
   doc.nextRulerId = meta.nextRulerId ?? doc.rulers.reduce((m, r) => Math.max(m, r.id + 1), 1);
   if (!doc.layers.length) throw new Error('El archivo no contiene capas.');
   return doc;
+}
+
+/**
+ * The picture a `.lienzo` file keeps of its page (PNG bytes), read from the first bytes of the file only: `range` gives bytes
+ * `start` to `end` of it, so a big document is never read whole. Null when the file has no picture (it was saved before there
+ * was one) or is not a valid file.
+ */
+export async function readLienzoPreview(range: (start: number, end: number) => Promise<Blob>): Promise<Uint8Array | null> {
+  try {
+    const head = new Uint8Array(await (await range(0, HEADER)).arrayBuffer());
+    if (head.length < HEADER || !MAGIC.every((b, i) => head[i] === b)) return null;
+    const metaLength = new DataView(head.buffer).getUint32(8, true);
+    if (metaLength <= 0 || metaLength > 64 * 1024 * 1024) return null;
+    const meta = JSON.parse(new TextDecoder().decode(await (await range(HEADER, HEADER + metaLength)).arrayBuffer())) as Metadata;
+    return typeof meta.preview === 'string' && meta.preview ? fromBase64(meta.preview) : null;
+  } catch {
+    return null;
+  }
 }
