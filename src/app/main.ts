@@ -96,7 +96,7 @@ import { armStaticPalettes } from '../ui/collapsible';
 import { createSelectionUi, isFillTool, isSelectionTool } from './selection-ui';
 import { listAutosaves, newAutosaveKey, removeAutosave, startAutosave, trimAutosaves, type StoredAutosave } from './autosave';
 import { hasUnsavedChanges, judgeCopy, planRestore, readSession, writeSession } from './session-state';
-import { chooseSaveTarget, dialogReportsType, filePlatform, hasPicker, modifiedAt, openFile, openFiles, readFrom, readKnownFile, saveAs as saveAsOutside, saveTo, writeToTarget, type FileFilter, type FileRef, type PickedFile, type SaveTarget } from './file-io';
+import { chooseSaveTarget, dialogReportsType, displayName, filePlatform, hasPicker, isApp, onAndroid, modifiedAt, openFile, openFiles, readFrom, readKnownFile, saveAs as saveAsOutside, saveTo, writeToTarget, type FileFilter, type FileRef, type PickedFile, type SaveTarget } from './file-io';
 import { openUpdatesWindow } from './updates-window';
 import { checkForUpdates, currentVersion, findUpdate, updatesAvailable } from './updates';
 import { loadRecent, mergeRecent, relocateRecent, sameFile, storeRecent, withoutRecent, type RecentFile } from './recent-files';
@@ -107,6 +107,8 @@ import { libraryFs } from './library-fs';
 import { createPreviewer, createThumbs, previewPng } from './library-preview';
 import { joinRel, uniqueName } from './library';
 import { createSaveFlow } from './save-flow';
+import { createExitGuard, installExitHooks } from './exit-guard';
+import { describeRecovery, type RecoveredWrite } from './write-recovery';
 import { flushSettings } from './settings-store';
 import { deniedNotice, failedNotice, savedNotice, type NoticeText, type SaveStep, type SavedResult } from './save-notice';
 import { formatInfo, formatOfName, formatsFor, isLayered, type SaveFormat, type SaveKind } from './save-formats';
@@ -2285,7 +2287,9 @@ async function encodeAs(kind: SaveKind, format: SaveFormat): Promise<{ blob: Blo
   }
   switch (format) {
     case 'lienzo':
-      return { blob: await saveLienzo(doc, { preview: () => previewPng(doc) }), warnings: [] };
+      // The page is taken now: the picture is made when the tiles are written, and another tab may be showing by then.
+      const page = doc;
+      return { blob: await saveLienzo(page, { preview: () => previewPng(page) }), warnings: [] };
     case 'clip': {
       // Edits a copy of the .clip the document was opened from (see clip-write.ts).
       const { value, warnings } = await exportClip(doc, { ...pngCodecs, loadSql });
@@ -2587,10 +2591,31 @@ async function showHome(): Promise<void> {
   syncHome();
 }
 
+/**
+ * The tab a save step began on. Encoding and writing a big page takes seconds and another tab can be shown meanwhile: what the step
+ * then ties to the file and marks as saved is still the document it began with, not whichever one is open when it ends.
+ */
+let saveTab = -1;
 /** The four ways to write the open document; see save-flow.ts. The variables below are the ones that tie it to a file. */
 const saveFlow = createSaveFlow({
-  association: () => ({ file: docFile, format: docFormat, name: docName, title: docTitle, clipOverwriteOk }),
+  association: () => {
+    saveTab = activeSessionId;
+    return { file: docFile, format: docFormat, name: docName, title: docTitle, clipOverwriteOk };
+  },
   associate: (next) => {
+    if (saveTab !== activeSessionId) {
+      const parked = sessionOf(saveTab);
+      if (parked) {
+        parked.file = next.file;
+        parked.format = next.format;
+        parked.name = next.name;
+        parked.title = next.file?.name ?? next.title ?? next.name;
+        parked.clipOk = next.clipOverwriteOk;
+        if (next.file) noteRecent(next.file);
+        updateStatusBar();
+      }
+      return;
+    }
     docFile = next.file;
     docFormat = next.format;
     docName = next.name;
@@ -2600,7 +2625,12 @@ const saveFlow = createSaveFlow({
     if (next.file) noteRecent(next.file);
   },
   revision: () => history.revision,
-  markSaved,
+  markSaved: (revision) => {
+    if (saveTab === activeSessionId) return markSaved(revision);
+    const parked = sessionOf(saveTab);
+    if (parked) parked.saved = revision;
+    updateStatusBar();
+  },
   canWriteClip: () => canWriteClip(doc),
   baseName,
   dialogReportsType,
@@ -4529,6 +4559,9 @@ mountLayoutResizers();
   get selected() {
     return selected;
   },
+  get requestExit() {
+    return exitGuard.requestExit;
+  },
   setTool,
   brush,
   setBrushSize,
@@ -4574,6 +4607,72 @@ const autosave = startAutosave({
   everyMs: () => (prefs.autosave ? prefs.autosaveMinutes * 60_000 : null),
 });
 void restoreSession();
+
+// ---- leaving the program -----------------------------------------------------------------------------
+// Whatever the way out (the window's close button, Android's back button, closing the page), changes that are in no file are asked
+// about first, even though the autosave holds a copy.
+const unsavedTabs = (): { id: number; title: string }[] =>
+  sessions.flatMap((s) => (s.id === activeSessionId ? (isDirty() ? [{ id: s.id, title: docTitle }] : []) : sessionDirty(s) ? [{ id: s.id, title: s.title }] : []));
+const exitGuard = createExitGuard({
+  unsaved: () => unsavedTabs().map((t) => t.title),
+  ask: (message, saveLabel) =>
+    choiceDialog<'save' | 'discard' | 'cancel'>(
+      message,
+      [
+        { label: saveLabel, value: 'save', primary: true },
+        { label: 'Salir sin guardar', value: 'discard' },
+        { label: 'Cancelar', value: 'cancel' },
+      ],
+      'cancel',
+    ),
+  saveAll: async () => {
+    for (const { id } of unsavedTabs()) {
+      await switchTo(id);
+      if (activeSessionId !== id) return false;
+      await saveFlow.save();
+      if (isDirty()) return false; // the person cancelled the save or it failed (they were told)
+    }
+    return unsavedTabs().length === 0;
+  },
+  discard: async () => {
+    const keys = unsavedTabs().map((t) => (t.id === activeSessionId ? autosaveKey : sessionOf(t.id)!.autosaveKey));
+    for (const key of keys) autosave.forget(key);
+    await Promise.all(keys.map((key) => removeAutosave(key).catch(() => undefined)));
+  },
+  quit: async () => {
+    await flushSettings().catch(() => undefined);
+    if (!isApp()) return; // a browser page is left by the person (the request only comes from beforeunload there)
+    const { invoke } = await import('@tauri-apps/api/core');
+    await invoke('quit_app');
+  },
+});
+void installExitHooks(
+  {
+    requestExit: exitGuard.requestExit,
+    hasUnsaved: () => unsavedTabs().length > 0,
+    closeOverlay: () => {
+      // a menu or a palette open on top: back closes it first (Escape is what closes them)
+      const open = document.querySelector('.menu-panel');
+      if (open) window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+      return !!open;
+    },
+  },
+  { app: isApp(), android: onAndroid() },
+);
+
+// Android writes a document over its file in place; a write that was cut (battery, force close) is finished now from the copy kept before it began.
+if (isApp() && onAndroid()) {
+  void import('@tauri-apps/api/core')
+    .then(({ invoke }) => invoke<RecoveredWrite[]>('recover_interrupted_writes'))
+    .then(async (list) => {
+      if (!list.length) return;
+      const names = new Map(await Promise.all(list.map(async (r) => [r.target, await displayName(r.target).catch(() => r.target)] as const)));
+      const report = describeRecovery(list, (t) => names.get(t) ?? t);
+      if (report.done) notify.info(report.done);
+      if (report.failed) void alertDialog(report.failed, 'Un guardado quedó a medias');
+    })
+    .catch(() => undefined);
+}
 // Should finding out take far too long, the cover is not left in the way.
 window.setTimeout(() => document.getElementById('boot')?.remove(), 15_000);
 

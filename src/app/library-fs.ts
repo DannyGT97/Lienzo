@@ -3,7 +3,7 @@
  * Windows, the app's folder on shared storage on Android); in a plain browser it is the page's private file system (OPFS), so the
  * same home screen works while developing. Both answer to the same small interface, with paths relative to the library folder.
  */
-import { baseRel, joinRel, parentRel, type LibEntry } from './library';
+import { baseRel, joinRel, nameClash, parentRel, type LibEntry } from './library';
 
 /** Where the library is, for the person to find it. */
 export interface LibLocation {
@@ -99,12 +99,13 @@ function opfsFs(): LibraryFs {
     for (const part of rel.split('/').filter(Boolean)) d = (await d.getDirectoryHandle(part, { create })) as Dir;
     return d;
   };
-  const exists = async (rel: string): Promise<boolean> => {
+  /** Whether something is called `rel` (compared without case), not counting the entry `own` (a path in the same folder) being renamed. */
+  const exists = async (rel: string, own?: string): Promise<boolean> => {
     const parent = await dirAt(parentRel(rel)).catch(() => null);
     if (!parent) return false;
-    const name = baseRel(rel);
-    for await (const [n] of parent.entries()) if (n.toLowerCase() === name.toLowerCase()) return true;
-    return false;
+    const names: string[] = [];
+    for await (const [n] of parent.entries()) names.push(n);
+    return nameClash(baseRel(rel), names, own !== undefined && parentRel(own) === parentRel(rel) ? baseRel(own) : undefined);
   };
   const isDir = async (rel: string): Promise<boolean> => {
     try {
@@ -147,7 +148,7 @@ function opfsFs(): LibraryFs {
     },
     async move(from, to) {
       if (to === from || to.startsWith(`${from}/`)) throw new Error('una carpeta no se puede mover dentro de sí misma');
-      if (from.toLowerCase() !== to.toLowerCase() && (await exists(to))) throw new Error('ya existe algo con ese nombre');
+      if (await exists(to, from)) throw new Error('ya existe algo con ese nombre');
       await copyTree(from, to);
       await api.remove(from);
     },

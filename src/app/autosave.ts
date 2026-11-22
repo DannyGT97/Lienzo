@@ -186,9 +186,11 @@ export function startAutosave(d: {
     lastAt = Date.now();
     tick();
   }, 5000);
+  // Going to the background is the last moment the app is sure to be alive (Android may end it any time after): a copy still being
+  // written is waited for and the document is written again if it changed meanwhile, which `tick` (one write at a time) would not.
   const now = (): void => {
     lastAt = Date.now();
-    tick();
+    void flush();
   };
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'hidden') now();

@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { BLEND_MODES } from './blend';
 import { flatten } from './composite';
 import { addLayer, createDocument } from './document';
-import { exportFlatPsd, exportPsd, importPsd } from './psd';
+import { exportFlatPsd, exportPsd, importPsd, readPsdPreview } from './psd';
 import { createMask } from './mask-ops';
 import { groupLayers } from './layer-tree';
 import { Selection } from './selection';
@@ -233,5 +233,41 @@ describe('flat PSD export', () => {
     expect(bytes[5]).toBe(2); // version 2 = PSB
     const back = importPsd(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer).value;
     expect(back.layers).toHaveLength(1);
+  });
+});
+
+describe('damaged PSD files', () => {
+  const sample = (): Uint8Array => new Uint8Array(exportPsd(sampleDoc()).value as ArrayBuffer);
+
+  it('refuses a header that asks for far more than the file can hold, before reserving memory for it', () => {
+    const b = sample();
+    const dv = new DataView(b.buffer);
+    dv.setUint32(14, 20000); // height
+    dv.setUint32(18, 20000); // width: 400 megapixels from a few kilobytes
+    expect(() => importPsd(b.buffer)).toThrow(/demasiado grande/);
+    expect(readPsdPreview(b.buffer)).toBeNull();
+  });
+
+  it('says what is wrong in Spanish whatever way the reader fails, and only throws Errors', () => {
+    const good = sample();
+    let failures = 0;
+    for (let cut = 0; cut < good.length; cut += 7) {
+      const cutBuf = good.slice(0, cut);
+      try {
+        importPsd(cutBuf.buffer);
+      } catch (err) {
+        failures++;
+        expect(err).toBeInstanceOf(Error);
+        expect((err as Error).message).toMatch(/PSD|imagen|incompleto|dañado/);
+      }
+    }
+    expect(failures).toBeGreaterThan(10);
+    const noise = good.slice();
+    for (let i = 26; i < noise.length; i += 5) noise[i] = (noise[i]! * 31 + 7) & 255;
+    try {
+      importPsd(noise.buffer);
+    } catch (err) {
+      expect(err).toBeInstanceOf(Error);
+    }
   });
 });

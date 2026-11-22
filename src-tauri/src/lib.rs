@@ -1,6 +1,7 @@
 use tauri::plugin::{Builder as PluginBuilder, TauriPlugin};
 
 mod library;
+mod safe_write;
 mod settings;
 mod update;
 
@@ -165,12 +166,33 @@ async fn android_update_install(app: tauri::AppHandle) -> Result<String, String>
   }
 }
 
+/// The folder where a copy of each document being written is kept until the file has it all (see `safe_write.rs`). It is the app's
+/// own data folder, not the cache: the system may empty the cache whenever it needs room, and this copy can be the only whole one.
+fn write_journal(app: &tauri::AppHandle) -> Result<safe_write::Journal, String> {
+  use tauri::Manager;
+  Ok(safe_write::Journal::new(app.path().app_local_data_dir().map_err(|e| e.to_string())?.join("pending-writes")))
+}
+
+/// Open a document's address for writing, emptying it first (`wt`: the same way the file plugin opens it, so the provider's
+/// permissions apply as usual).
+fn open_document(app: &tauri::AppHandle, path: &str) -> Result<std::fs::File, String> {
+  use std::str::FromStr;
+  use tauri_plugin_fs::{FilePath, FsExt, OpenOptions};
+  let target = FilePath::from_str(path).map_err(|e| format!("ruta no válida: {e}"))?;
+  let mut options = OpenOptions::new();
+  options.write(true).truncate(true).create(true);
+  app.fs().open(target, options).map_err(|e| format!("failed to open file: {e}"))
+}
+
 /// Replace the contents of a file (an Android content address) with `data`, given as base64 text.
 ///
 /// Why not the file plugin's `writeFile`: on Android the WebView cannot send a request body to the native side, so a byte
 /// array travels as JSON text with one number per byte (and is read back as one JSON value per byte). A 50 MB document
 /// freezes the page and can run the tablet out of memory. A single string is a third bigger than the file and nothing more.
-/// The file is opened the same way the plugin opens it (`wt`: write, truncating), so the provider's permissions apply as usual.
+///
+/// A content address cannot be written beside and renamed over, only rewritten in place, so a cut (battery, force close) in the
+/// middle would leave a piece of the document. Before the file is touched a whole copy is kept in the app's own folder
+/// (`safe_write::Journal`), and `recover_interrupted_writes` finishes any write that was cut when the app starts again.
 ///
 /// This command bypasses the file plugin's scope, so it is limited to what it is for: Android, and a `content://` address
 /// (a document the person picked, whose grant the system holds). Nothing else can be written through it.
@@ -183,24 +205,73 @@ async fn write_document(app: tauri::AppHandle, path: String, data: String) -> Re
     return Err("write_document only writes documents chosen with the system picker".into());
   }
   use base64::Engine;
-  use std::io::Write;
-  use std::str::FromStr;
-  use tauri_plugin_fs::{FilePath, FsExt, OpenOptions};
 
   tauri::async_runtime::spawn_blocking(move || {
     let bytes = base64::engine::general_purpose::STANDARD
       .decode(data.as_bytes())
       .map_err(|e| format!("el archivo preparado no es válido: {e}"))?;
     drop(data);
-    let target = FilePath::from_str(&path).map_err(|e| format!("ruta no válida: {e}"))?;
-    let mut options = OpenOptions::new();
-    options.write(true).truncate(true).create(true);
-    let mut file = app.fs().open(target, options).map_err(|e| format!("failed to open file: {e}"))?;
-    file.write_all(&bytes).map_err(|e| format!("failed to write bytes to file: {e}"))?;
-    file.flush().map_err(|e| format!("failed to write bytes to file: {e}"))
+    write_journal(&app)?.write_through(&path, &bytes, || open_document(&app, &path))
   })
   .await
   .map_err(|e| e.to_string())?
+}
+
+/// Finish the writes that were cut the last time (Android): each one is written again from the copy kept before it began. Called
+/// when the app starts; says which files were completed and which could not be yet.
+#[tauri::command]
+async fn recover_interrupted_writes(app: tauri::AppHandle) -> Result<Vec<safe_write::Recovered>, String> {
+  if !cfg!(target_os = "android") {
+    return Ok(Vec::new());
+  }
+  tauri::async_runtime::spawn_blocking(move || Ok(write_journal(&app)?.recover(|path| open_document(&app, path))))
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Write a file on the computer without ever leaving it half written: the bytes travel as the request body (the file plugin's
+/// way: no text detour for a big document) and the path in the `path` header, URI-encoded. Only places the dialogs or the
+/// file plugin's scope already allow, like the plugin's own `writeFile`.
+#[tauri::command]
+async fn write_file_safe(app: tauri::AppHandle, request: tauri::ipc::Request<'_>) -> Result<(), String> {
+  use tauri_plugin_fs::FsExt;
+  if cfg!(target_os = "android") {
+    return Err("write_file_safe is not for Android".into());
+  }
+  let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else {
+    return Err("el archivo no llegó como bytes".into());
+  };
+  let header = request.headers().get("path").and_then(|v| v.to_str().ok()).ok_or("falta la ruta del archivo")?;
+  let path = std::path::PathBuf::from(percent_decode(header)?);
+  if !app.fs_scope().is_allowed(&path) {
+    return Err("Lienzo no tiene permiso para escribir ahí".into());
+  }
+  let bytes = bytes.clone();
+  tauri::async_runtime::spawn_blocking(move || safe_write::replace_file(&path, &bytes)).await.map_err(|e| e.to_string())?
+}
+
+/// `%XX` escapes (what `encodeURIComponent` makes) back to text.
+fn percent_decode(text: &str) -> Result<String, String> {
+  let raw = text.as_bytes();
+  let mut out = Vec::with_capacity(raw.len());
+  let mut i = 0;
+  while i < raw.len() {
+    if raw[i] == b'%' {
+      let hex = raw.get(i + 1..i + 3).and_then(|h| std::str::from_utf8(h).ok()).and_then(|h| u8::from_str_radix(h, 16).ok()).ok_or("ruta no válida")?;
+      out.push(hex);
+      i += 3;
+    } else {
+      out.push(raw[i]);
+      i += 1;
+    }
+  }
+  String::from_utf8(out).map_err(|_| "ruta no válida".to_string())
+}
+
+/// Close the program (after the person answered what to do with their unsaved changes).
+#[tauri::command]
+fn quit_app(app: tauri::AppHandle) {
+  app.exit(0);
 }
 
 /// What kind of build this is, for "Acerca de": a test build (debug) or the one published as a release.
@@ -228,7 +299,7 @@ pub fn run() {
   builder
     .plugin(tauri_plugin_dialog::init())
     .plugin(doc_picker())
-    .invoke_handler(tauri::generate_handler![build_info, pick_document, pick_documents, create_document, write_document, android_update_check, android_update_install, library::library_info, library::library_list, library::library_mkdir, library::library_move, library::library_copy, library::library_remove, library::library_read, library::library_read_range, library::library_write, library::library_reveal, library::library_request_access, settings::settings_read, settings::settings_write])
+    .invoke_handler(tauri::generate_handler![build_info, pick_document, pick_documents, create_document, write_document, recover_interrupted_writes, write_file_safe, quit_app, android_update_check, android_update_install, library::library_info, library::library_list, library::library_mkdir, library::library_move, library::library_copy, library::library_remove, library::library_read, library::library_read_range, library::library_write, library::library_reveal, library::library_request_access, settings::settings_read, settings::settings_write])
     .plugin(tauri_plugin_fs::init())
     .setup(|app| {
       if cfg!(debug_assertions) {
@@ -242,4 +313,17 @@ pub fn run() {
     })
     .run(tauri::generate_context!())
     .expect("error while building tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+  use super::percent_decode;
+
+  #[test]
+  fn reads_the_path_the_page_encoded() {
+    assert_eq!(percent_decode("C%3A%5CUsers%5CAna%20Mar%C3%ADa%5Cdibujo.lienzo").unwrap(), r"C:\Users\Ana María\dibujo.lienzo");
+    assert_eq!(percent_decode("plain.lienzo").unwrap(), "plain.lienzo");
+    assert!(percent_decode("bad%zz").is_err());
+    assert!(percent_decode("cut%4").is_err());
+  }
 }

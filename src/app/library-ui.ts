@@ -22,6 +22,7 @@ import {
   isInside,
   joinRel,
   kindLabel,
+  nameClash,
   nameProblem,
   parentRel,
   parsePrefs,
@@ -1167,7 +1168,7 @@ export function createHome(root: HTMLElement, deps: HomeDeps): Home {
         const bad = nameProblem(name);
         if (bad) return void alertDialog(bad, 'No se pudo renombrar');
         const to = joinRel(parentRel(rel), name);
-        if (name.toLowerCase() !== it.name.toLowerCase() && (await exists(to))) return void alertDialog(`Ya hay algo llamado «${name}» ahí.`, 'No se pudo renombrar');
+        if (nameClash(name, await siblings(parentRel(rel)), it.name)) return void alertDialog(`Ya hay algo llamado «${name}» ahí.`, 'No se pudo renombrar');
         await fs.move(rel, to);
         return after(rel, to);
       }

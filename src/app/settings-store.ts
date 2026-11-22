@@ -83,8 +83,13 @@ export async function flushSettings(): Promise<void> {
 export async function startSettingsMirror(file: SettingsFile, store: ReadableStore & WritableStore, watch: (changed: () => void) => void): Promise<void> {
   let saved: string | null;
   try {
-    const timeout = new Promise<never>((_, fail) => setTimeout(() => fail(new Error('timeout')), READ_TIMEOUT_MS));
-    saved = await Promise.race([file.read(), timeout]);
+    let stop: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<never>((_, fail) => (stop = setTimeout(() => fail(new Error('timeout')), READ_TIMEOUT_MS)));
+    try {
+      saved = await Promise.race([file.read(), timeout]);
+    } finally {
+      clearTimeout(stop);
+    }
   } catch {
     // Not knowing what the file holds, nothing is written to it: a store that lost its data must never replace a good file.
     return;

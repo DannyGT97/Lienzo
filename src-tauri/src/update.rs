@@ -62,7 +62,11 @@ pub fn is_newer(current: &str, candidate: &str) -> Result<bool, String> {
 
 /// Only an address inside this repository's releases, over https, is ever downloaded.
 pub fn check_download_url(url: &str) -> Result<(), String> {
-  if url.starts_with(DOWNLOAD_PREFIX) && !url.contains("..") {
+  // What follows the prefix is a tag and a file name: plain characters only. "%2e%2e" is read by a URL as ".." (going up out of the
+  // releases), as is "\\", so neither may get through written some other way.
+  let rest = url.strip_prefix(DOWNLOAD_PREFIX).unwrap_or("");
+  let plain = !rest.is_empty() && rest.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '+' | '/'));
+  if plain && !rest.split('/').any(|part| part.is_empty() || part == "." || part == "..") {
     Ok(())
   } else {
     Err("la dirección de descarga no es de las versiones oficiales de Lienzo".into())
@@ -154,6 +158,17 @@ pub use android::{check, install};
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn refuses_dots_written_as_percent_codes_which_a_url_reads_as_going_up() {
+    let sneaky = "https://github.com/DannyGT97/Lienzo/releases/download/%2e%2e/%2E%2E/x.apk";
+    // What the network library would really ask for: the folder climbed out of the releases.
+    assert_eq!(tauri::Url::parse(sneaky).unwrap().path(), "/DannyGT97/Lienzo/x.apk");
+    assert!(check_download_url(sneaky).is_err());
+    assert!(check_download_url("https://github.com/DannyGT97/Lienzo/releases/download/v1/%2e%2e/x.apk").is_err());
+    assert!(check_download_url(r"https://github.com/DannyGT97/Lienzo/releases/download/v1\..\x.apk").is_err());
+    assert!(check_download_url("https://github.com/DannyGT97/Lienzo/releases/download/v0.2.0/Lienzo-0.2.0-android-arm64.apk").is_ok());
+  }
 
   const GOOD: &str = r#"{ "version": "0.2.0", "notes": "Novedades", "platforms": {
     "android-aarch64": { "url": "https://github.com/DannyGT97/Lienzo/releases/download/v0.2.0/Lienzo-0.2.0-android-arm64.apk", "signature": "c2ln" },

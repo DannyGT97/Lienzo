@@ -181,6 +181,15 @@ async function writeOnAndroid(path: string, blob: Blob): Promise<void> {
   await invoke('write_document', { path, data });
 }
 
+/**
+ * On the computer the file is written beside the old one and renamed over it (`write_file_safe`, src-tauri/src/safe_write.rs), so a
+ * cut in the middle leaves the old document or the new one, never half of one. The bytes travel as the request body, the path in a header.
+ */
+async function writeOnDesktop(path: string, blob: Blob): Promise<void> {
+  const { invoke } = await import('@tauri-apps/api/core');
+  await invoke('write_file_safe', new Uint8Array(await blob.arrayBuffer()), { headers: { path: encodeURIComponent(path) } });
+}
+
 /** Write to a place a document was saved to or opened from before. */
 export async function saveTo(ref: FileRef, blob: Blob): Promise<void> {
   if (ref.kind === 'library') {
@@ -190,10 +199,7 @@ export async function saveTo(ref: FileRef, blob: Blob): Promise<void> {
   if (ref.kind === 'tauri') {
     try {
       if (onAndroid()) await writeOnAndroid(ref.path, blob);
-      else {
-        const { writeFile } = await import('@tauri-apps/plugin-fs');
-        await writeFile(ref.path, new Uint8Array(await blob.arrayBuffer()));
-      }
+      else await writeOnDesktop(ref.path, blob);
     } catch (err) {
       if (isPermissionRefusal(err)) throw new WriteDeniedError(ref.name, err);
       throw err;

@@ -1,6 +1,7 @@
 import { initializeCanvas, readPsd, writePsd, type BlendMode as PsdBlend, type Layer as PsdLayer, type Psd } from 'ag-psd';
 import type { BlendMode } from './blend';
 import { flattenRegion } from './composite';
+import { DECODE_PIXEL_LIMIT } from './image-decode';
 import { createDocument, newLayer, type Document, type Layer, type LayerMask } from './document';
 import { layerTree, type TreeNode } from './layer-tree';
 import { TILE, TILE_BYTES, TiledSurface, type Rect } from './tiles';
@@ -213,8 +214,25 @@ export function exportFlatPsd(doc: Document, options: { large?: boolean } = {}):
  * The merged picture a PSD/PSB carries (what Photoshop keeps for programs that cannot read layers), without decoding any layer.
  * Null when the file has none, it is blank, or it cannot be read: the caller then reads the whole file.
  */
+/**
+ * Looked at before the reader gets the bytes: the size in the header decides how much memory the reader reserves, and a few
+ * damaged bytes there made a file of a few kilobytes ask for gigabytes (the app closed instead of saying the file was bad).
+ * Throws what is wrong, in words for the person; returns nothing when the header is fine.
+ */
+function checkPsdHeader(buffer: ArrayBuffer): void {
+  if (buffer.byteLength < 26) throw new Error('El archivo PSD está incompleto o dañado.');
+  const head = new DataView(buffer);
+  if (head.getUint32(0) !== 0x38425053) throw new Error('El archivo no es un PSD válido.');
+  const [height, width] = [head.getUint32(14), head.getUint32(18)];
+  if (width < 1 || height < 1) throw new Error('El archivo PSD está dañado (la imagen no tiene tamaño).');
+  if (width * height > DECODE_PIXEL_LIMIT) {
+    throw new Error(`La imagen es demasiado grande (${width} × ${height} px; el máximo son ${DECODE_PIXEL_LIMIT / 1e6} megapíxeles) o el archivo está dañado.`);
+  }
+}
+
 export function readPsdPreview(buffer: ArrayBuffer): { width: number; height: number; data: Uint8ClampedArray } | null {
   try {
+    checkPsdHeader(buffer);
     const psd = readPsd(buffer, { useImageData: true, skipThumbnail: true, skipLayerImageData: true });
     if (psd.bitsPerChannel !== undefined && psd.bitsPerChannel !== 8) return null;
     const img = psd.imageData;
@@ -228,7 +246,14 @@ export function readPsdPreview(buffer: ArrayBuffer): { width: number; height: nu
 
 export function importPsd(buffer: ArrayBuffer): PsdResult<Document> {
   const warnings: string[] = [];
-  const psd = readPsd(buffer, { useImageData: true, skipThumbnail: true });
+  checkPsdHeader(buffer);
+  let psd: Psd;
+  try {
+    psd = readPsd(buffer, { useImageData: true, skipThumbnail: true });
+  } catch (err) {
+    // The reader's own messages are raw ("Offset is outside the bounds of the DataView"), and some of its failures are not even Errors.
+    throw new Error(`El archivo PSD está dañado o incompleto (${err instanceof Error ? err.message : String(err)}).`);
+  }
   if (psd.bitsPerChannel !== undefined && psd.bitsPerChannel !== 8) {
     throw new Error(`Solo se admiten PSD de 8 bits por canal (este tiene ${psd.bitsPerChannel}).`);
   }

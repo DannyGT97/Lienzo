@@ -150,14 +150,27 @@ pub async fn library_mkdir(app: tauri::AppHandle, rel: String) -> Result<(), Str
 #[tauri::command]
 pub async fn library_move(app: tauri::AppHandle, from: String, to: String) -> Result<(), String> {
   let (base, _) = root(&app)?;
-  let (a, b) = (resolve(&base, &from)?, resolve(&base, &to)?);
+  move_entry(&base, &from, &to)
+}
+
+/// Whether `a` and `b` are one and the same file or folder (a rename that only changes the case of its name, on a file system that
+/// ignores case). Asked of the file system, not of the spelling: on one that tells "foo" from "Foo" (Android) they are two entries.
+fn same_entry(a: &Path, b: &Path) -> bool {
+  match (fs::canonicalize(a), fs::canonicalize(b)) {
+    (Ok(x), Ok(y)) => x == y,
+    _ => false,
+  }
+}
+
+fn move_entry(base: &Path, from: &str, to: &str) -> Result<(), String> {
+  let (a, b) = (resolve(base, from)?, resolve(base, to)?);
   if a == base {
     return Err("la carpeta de la biblioteca no se puede mover".into());
   }
   if b.starts_with(&a) {
     return Err("una carpeta no se puede mover dentro de sí misma".into());
   }
-  if b.exists() && !a.to_string_lossy().eq_ignore_ascii_case(&b.to_string_lossy()) {
+  if b.exists() && !same_entry(&a, &b) {
     return Err("ya existe algo con ese nombre".into());
   }
   fs::rename(&a, &b).map_err(|e| format!("no se pudo mover: {e}"))
@@ -291,5 +304,60 @@ pub async fn library_request_access(app: tauri::AppHandle) -> Result<(), String>
   {
     let _ = app;
     Ok(())
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  /// A fresh folder that tells "foo" from "Foo", like Android's storage does. `None` where the system cannot make one (then the
+  /// test has nothing to check and passes).
+  fn case_sensitive_dir(name: &str) -> Option<PathBuf> {
+    let dir = std::env::temp_dir().join(format!("lienzo-library-test-{}-{name}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).ok()?;
+    #[cfg(windows)]
+    {
+      let ok = std::process::Command::new("fsutil").args(["file", "setCaseSensitiveInfo"]).arg(&dir).arg("enable").output().map(|o| o.status.success()).unwrap_or(false);
+      if !ok {
+        let _ = fs::remove_dir_all(&dir);
+        return None;
+      }
+    }
+    fs::write(dir.join("a"), "a").ok()?;
+    if fs::write(dir.join("A"), "A").is_err() || fs::read_to_string(dir.join("a")).ok()? != "a" {
+      let _ = fs::remove_dir_all(&dir);
+      return None;
+    }
+    fs::remove_file(dir.join("A")).ok()?;
+    fs::remove_file(dir.join("a")).ok()?;
+    Some(dir)
+  }
+
+  #[test]
+  fn renaming_over_a_name_that_differs_only_in_case_is_refused_where_case_matters() {
+    let Some(dir) = case_sensitive_dir("clash") else { return };
+    fs::write(dir.join("foo.lienzo"), "ORIGINAL foo").unwrap();
+    fs::write(dir.join("Foo.lienzo"), "the other one").unwrap();
+    assert!(move_entry(&dir, "Foo.lienzo", "foo.lienzo").is_err(), "must not replace another document");
+    assert_eq!(fs::read_to_string(dir.join("foo.lienzo")).unwrap(), "ORIGINAL foo");
+    assert_eq!(fs::read_to_string(dir.join("Foo.lienzo")).unwrap(), "the other one");
+    let _ = fs::remove_dir_all(&dir);
+  }
+
+  #[test]
+  fn a_case_only_rename_of_one_entry_still_works_and_other_clashes_are_refused() {
+    let dir = std::env::temp_dir().join(format!("lienzo-library-test-{}-plain", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("Foo.lienzo"), "one").unwrap();
+    fs::write(dir.join("bar.lienzo"), "two").unwrap();
+    move_entry(&dir, "Foo.lienzo", "foo.lienzo").unwrap();
+    let names: Vec<String> = fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+    assert!(names.contains(&"foo.lienzo".to_string()), "{names:?}");
+    assert!(move_entry(&dir, "foo.lienzo", "bar.lienzo").is_err());
+    assert_eq!(fs::read_to_string(dir.join("bar.lienzo")).unwrap(), "two");
+    let _ = fs::remove_dir_all(&dir);
   }
 }

@@ -10,6 +10,7 @@ import {
   formatWhen,
   isInside,
   joinRel,
+  nameClash,
   nameProblem,
   parentRel,
   parsePrefs,
@@ -69,6 +70,19 @@ describe('nameProblem', () => {
     expect(nameProblem('NUL')).not.toBeNull();
     expect(nameProblem('com1.txt')).not.toBeNull();
     expect(nameProblem('x'.repeat(121))).not.toBeNull();
+  });
+});
+
+describe('nameClash', () => {
+  it('counts another entry that differs only in case, but not the one being renamed', () => {
+    // Android: "Foo" and "foo" are two documents, so renaming one to the other's name would replace it.
+    expect(nameClash('foo.lienzo', ['Foo.lienzo', 'foo.lienzo'], 'Foo.lienzo')).toBe(true);
+    expect(nameClash('FOO.lienzo', ['Foo.lienzo', 'foo.lienzo'], 'Foo.lienzo')).toBe(true);
+    // Windows: only the entry itself is there, and a case-only rename is fine.
+    expect(nameClash('foo.lienzo', ['Foo.lienzo', 'bar.lienzo'], 'Foo.lienzo')).toBe(false);
+    expect(nameClash('bar.lienzo', ['Foo.lienzo', 'bar.lienzo'], 'Foo.lienzo')).toBe(true);
+    expect(nameClash('new.lienzo', ['Foo.lienzo'])).toBe(false);
+    expect(nameClash('FOO.lienzo', ['Foo.lienzo'])).toBe(true);
   });
 });
 

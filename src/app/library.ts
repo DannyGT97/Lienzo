@@ -89,6 +89,16 @@ export function nameProblem(name: string): string | null {
   return null;
 }
 
+/**
+ * Whether `name` is already taken among `taken` (compared without case), not counting `own`, the entry being renamed: on a file
+ * system that ignores case "Foo" → "foo" is the same entry, on one that does not (Android) a "foo" beside it is another document.
+ */
+export function nameClash(name: string, taken: Iterable<string>, own?: string): boolean {
+  const low = name.toLowerCase();
+  for (const n of taken) if (n !== own && n.toLowerCase() === low) return true;
+  return false;
+}
+
 /** `name` made not to collide with `taken` (compared without case): "dibujo.lienzo" → "dibujo copia.lienzo" → "dibujo copia 2.lienzo". */
 export function uniqueName(name: string, taken: Iterable<string>, withExtension = true): string {
   const used = new Set([...taken].map((n) => n.toLowerCase()));
