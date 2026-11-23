@@ -1,7 +1,7 @@
-Guardar ya no congela la ventana, los ajustes sobreviven a las actualizaciones y los pinceles vienen con valores más lógicos.
+Guardar ya no congela la tableta, y Lienzo te pregunta antes de cerrar con cambios sin guardar.
 
-- Guardar y abrir: la compresión de los documentos `.lienzo` pasa a segundo plano, así que la ventana sigue respondiendo mientras se guarda (y guardar es bastante más rápido).
-- Ajustes que ya no se pierden: preferencias, ajustes de pinceles, paletas visibles y tamaños de los paneles se guardan además en un archivo propio de la app y se restauran al arrancar, también tras actualizar.
-- Corrección del trazo: nuevo ajuste (Nada, Débil, Medio, Fuerte) que suaviza el recorrido entero al levantar el lápiz, sin retardo mientras dibujas. Se unifican los ajustes de estabilización.
-- Pinceles: Pluma G, lápiz, portaminas, aerógrafo suave, carboncillo, crayón, pastel, gotas, acuarela redonda y óleo vienen ahora con opacidad 100 %. La Pluma G ya da color completo en una sola pasada, y el lápiz es algo más oscuro con presión media.
-- Valores por defecto: botón siempre visible en las propiedades de cada subherramienta y en su detalle, con confirmación antes de restaurar.
+- Guardar sin bloqueos en Android: el documento se envía a trozos pequeños, así que la ventana sigue respondiendo mientras se guarda, y ya no se codifica dos veces justo después de guardar.
+- Guardado a prueba de cortes: en Android, antes de tocar tu archivo se guarda una copia completa y, si la batería o un cierre forzado interrumpen el guardado, Lienzo lo termina al abrir de nuevo. En Windows el archivo se escribe aparte y se renombra, así que nunca queda a medias.
+- Aviso al salir: si hay cambios sin guardar, Lienzo siempre pregunta antes de cerrar (botón de cerrar en escritorio, botón atrás en Android), aunque exista el autoguardado.
+- Preferencias renovadas: buscador, secciones, cambios que se aplican al momento, botón para volver al valor por defecto de cada opción y vista pensada para el móvil. Incluye la nueva sección «Archivo y copias» para el autoguardado.
+- Fallos corregidos: guardar y cambiar de pestaña a la vez marcaba la pestaña equivocada y ponía la miniatura de otro documento; el autoguardado perdía lo último al pasar a segundo plano; un PSD dañado podía agotar la memoria; renombrar «Foo» a «foo» podía sobrescribir otro archivo; la descarga de actualizaciones comprueba mejor la dirección.

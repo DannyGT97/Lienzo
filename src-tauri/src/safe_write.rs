@@ -141,6 +141,76 @@ impl Journal {
     }
   }
 
+  // ---- the same write, handed over in pieces ---------------------------------------------------------------------------
+  // A big document sent over in one message is one huge string for the web view to build, copy and send: on a tablet the whole
+  // window stops while it does. In pieces, each costs a few milliseconds and the window keeps answering between them. The pieces
+  // are written straight into the journal's copy, so nothing is held in memory, and `commit` then writes the target from it.
+
+  /// Start receiving the new bytes of `target`. Returns the key to name the pieces with. Anything left from an earlier try is dropped.
+  pub fn begin(&self, target: &str) -> Result<String, String> {
+    let _one_at_a_time = BUSY.lock().unwrap_or_else(|e| e.into_inner());
+    let key = key_of(target);
+    fs::create_dir_all(&self.dir).map_err(|e| format!("no se pudo preparar la copia segura: {e}"))?;
+    fs::File::create(self.part(&key)).map_err(|e| format!("no se pudo hacer la copia segura: {e}"))?;
+    Ok(key)
+  }
+
+  /// The next piece, after the ones before it.
+  pub fn append(&self, key: &str, bytes: &[u8]) -> Result<(), String> {
+    let _one_at_a_time = BUSY.lock().unwrap_or_else(|e| e.into_inner());
+    let mut part = fs::OpenOptions::new().append(true).open(self.part(key)).map_err(|e| format!("no se pudo hacer la copia segura: {e}"))?;
+    part.write_all(bytes).map_err(|e| format!("no se pudo hacer la copia segura: {e}"))
+  }
+
+  /// Nothing more is coming (the save was cancelled or failed on the way): the target was never touched.
+  pub fn abort(&self, key: &str) {
+    let _one_at_a_time = BUSY.lock().unwrap_or_else(|e| e.into_inner());
+    let _ = fs::remove_file(self.part(key));
+  }
+
+  /// All the pieces are in: make the copy permanent, then write `target` from it like `write_through` does (and with the same
+  /// guarantees: if `open` fails nothing was touched; once it opens, the copy stays until the file is written and its size checked).
+  pub fn commit(&self, key: &str, target: &str, open: impl FnOnce() -> Result<fs::File, String>) -> Result<(), String> {
+    let _one_at_a_time = BUSY.lock().unwrap_or_else(|e| e.into_inner());
+    if key != key_of(target) {
+      return Err("el guardado no corresponde a ese archivo".into());
+    }
+    let sealed = (|| {
+      fs::OpenOptions::new().append(true).open(self.part(key))?.sync_all()?; // opened for writing: some systems refuse to flush a file opened only for reading
+      fs::rename(self.part(key), self.data(key))?;
+      let mut n = fs::File::create(self.note(key))?;
+      n.write_all(target.as_bytes())?;
+      n.sync_all()
+    })();
+    if let Err(e) = sealed {
+      self.abort_locked(key);
+      return Err(format!("no se pudo hacer la copia segura: {e}"));
+    }
+    let mut file = match open() {
+      Ok(f) => f,
+      Err(e) => {
+        self.forget(key);
+        return Err(e);
+      }
+    };
+    match copy_into(&mut file, &self.data(key)) {
+      Ok(()) => {
+        self.forget(key);
+        Ok(())
+      }
+      Err(e) => Err(format!("{e}. Hay una copia segura del documento: se completará la próxima vez que abras Lienzo.")),
+    }
+  }
+
+  fn part(&self, key: &str) -> PathBuf {
+    self.dir.join(format!("{key}.part"))
+  }
+
+  fn abort_locked(&self, key: &str) {
+    let _ = fs::remove_file(self.part(key));
+    self.forget(key);
+  }
+
   /// Finish every write that was cut: each copy in the journal is written again to its target. A copy that cannot be written yet
   /// (access lost, file gone) is kept for a while and reported, then dropped.
   pub fn recover(&self, open: impl Fn(&str) -> Result<fs::File, String>) -> Vec<Recovered> {
@@ -158,11 +228,11 @@ impl Journal {
         _ => continue,
       }
       let Some(key) = path.file_stem().map(|s| s.to_string_lossy().into_owned()) else { continue };
-      let (Ok(target), Ok(bytes)) = (fs::read_to_string(&path), fs::read(self.data(&key))) else {
+      let (Ok(target), true) = (fs::read_to_string(&path), self.data(&key).is_file()) else {
         self.forget(&key);
         continue;
       };
-      let result = open(&target).and_then(|mut f| put(&mut f, &bytes).map_err(|e| e.to_string()));
+      let result = open(&target).and_then(|mut f| copy_into(&mut f, &self.data(&key)));
       match result {
         Ok(()) => {
           self.forget(&key);
@@ -181,13 +251,27 @@ impl Journal {
   }
 }
 
+/// Write the file at `from` into `file` in pieces (a big document is never held in memory) and make sure it is all there.
+fn copy_into(file: &mut fs::File, from: &Path) -> Result<(), String> {
+  let mut source = fs::File::open(from).map_err(|e| format!("no se pudo leer la copia segura: {e}"))?;
+  let length = source.metadata().map_err(|e| e.to_string())?.len();
+  std::io::copy(&mut std::io::BufReader::with_capacity(1 << 20, &mut source), file).map_err(|e| format!("no se pudo escribir el archivo: {e}"))?;
+  file.flush().map_err(|e| format!("no se pudo escribir el archivo: {e}"))?;
+  let _ = file.sync_all();
+  check_size(file, length)
+}
+
 /// Write all of `bytes` and make sure they are all there.
 fn put(file: &mut fs::File, bytes: &[u8]) -> Result<(), String> {
   file.write_all(bytes).and_then(|_| file.flush()).map_err(|e| format!("no se pudo escribir el archivo: {e}"))?;
   let _ = file.sync_all(); // not every provider can; the size below is what is checked
-  // A provider that hands out a pipe instead of the file itself reports no size at all (0): that is not a cut, `write_all` would have failed.
+  check_size(file, bytes.len() as u64)
+}
+
+/// A provider that hands out a pipe instead of the file itself reports no size at all (0): that is not a cut, `write_all` would have failed.
+fn check_size(file: &fs::File, expected: u64) -> Result<(), String> {
   match file.metadata() {
-    Ok(m) if m.len() != 0 && m.len() != bytes.len() as u64 => Err(format!("el archivo quedó con {} bytes en vez de {}", m.len(), bytes.len())),
+    Ok(m) if m.len() != 0 && m.len() != expected => Err(format!("el archivo quedó con {} bytes en vez de {expected}", m.len())),
     _ => Ok(()),
   }
 }
@@ -312,6 +396,74 @@ mod tests {
     let report = journal.recover(|_| Err("el archivo ya no existe".into()));
     assert_eq!(report, vec![Recovered { target: "content://gone".into(), ok: false, error: Some("el archivo ya no existe".into()) }]);
     assert!(journal.data(&key_of("content://gone")).exists(), "the only whole copy of the document is not thrown away");
+    let _ = fs::remove_dir_all(&dir);
+  }
+
+  #[test]
+  fn a_document_handed_over_in_pieces_ends_up_whole_and_leaves_nothing_behind() {
+    let dir = temp("pieces");
+    let target = dir.join("doc.lienzo");
+    fs::write(&target, "the old document, longer than a piece").unwrap();
+    let journal = Journal::new(dir.join("journal"));
+    let whole: Vec<u8> = (0..30_000u32).map(|i| (i % 253) as u8).collect();
+    let key = journal.begin("content://doc").unwrap();
+    for piece in whole.chunks(7_000) {
+      journal.append(&key, piece).unwrap();
+    }
+    assert_eq!(fs::read(&target).unwrap(), b"the old document, longer than a piece", "nothing touches the file before the commit");
+    journal.commit(&key, "content://doc", || open_for_writing(&target)).unwrap();
+    assert_eq!(fs::read(&target).unwrap(), whole);
+    assert_eq!(fs::read_dir(dir.join("journal")).unwrap().count(), 0);
+    let _ = fs::remove_dir_all(&dir);
+  }
+
+  #[test]
+  fn pieces_that_never_get_committed_leave_the_file_alone_and_are_cleaned_up() {
+    let dir = temp("aborted");
+    let target = dir.join("doc.lienzo");
+    fs::write(&target, "untouched").unwrap();
+    let journal = Journal::new(dir.join("journal"));
+    let key = journal.begin("content://doc").unwrap();
+    journal.append(&key, b"half of a new document").unwrap();
+    journal.abort(&key);
+    assert_eq!(fs::read_dir(dir.join("journal")).unwrap().count(), 0);
+    // Killed before the end: the leftover is dropped at the next start and the file is still the old document.
+    let key = journal.begin("content://doc").unwrap();
+    journal.append(&key, b"half").unwrap();
+    assert!(journal.recover(|_| Err("no debería abrirse".into())).is_empty());
+    assert_eq!(fs::read_dir(dir.join("journal")).unwrap().count(), 0);
+    assert_eq!(fs::read(&target).unwrap(), b"untouched");
+    let _ = fs::remove_dir_all(&dir);
+  }
+
+  #[test]
+  fn a_commit_to_another_file_or_to_one_that_cannot_be_opened_touches_nothing() {
+    let dir = temp("refused");
+    let journal = Journal::new(dir.join("journal"));
+    let key = journal.begin("content://doc").unwrap();
+    journal.append(&key, b"bytes").unwrap();
+    assert!(journal.commit(&key, "content://other", || Err("no".into())).is_err());
+    let err = journal.commit(&key, "content://doc", || Err("sin permiso".into())).unwrap_err();
+    assert_eq!(err, "sin permiso");
+    assert_eq!(fs::read_dir(dir.join("journal")).unwrap().count(), 0, "a file that could not be opened was never touched: no copy to keep");
+    let _ = fs::remove_dir_all(&dir);
+  }
+
+  #[test]
+  fn a_commit_cut_short_is_finished_at_the_next_start() {
+    let dir = temp("cutcommit");
+    let target = dir.join("doc.lienzo");
+    fs::write(&target, "old").unwrap();
+    let journal = Journal::new(dir.join("journal"));
+    let whole = vec![7u8; 4000];
+    let key = journal.begin("content://doc").unwrap();
+    journal.append(&key, &whole).unwrap();
+    // A target that opens for reading only: the write fails after the file was reached, so the copy must stay.
+    let err = journal.commit(&key, "content://doc", || fs::File::open(&target).map_err(|e| e.to_string())).unwrap_err();
+    assert!(err.contains("copia segura"), "{err}");
+    let report = Journal::new(dir.join("journal")).recover(|_| open_for_writing(&target));
+    assert!(report[0].ok);
+    assert_eq!(fs::read(&target).unwrap(), whole);
     let _ = fs::remove_dir_all(&dir);
   }
 }

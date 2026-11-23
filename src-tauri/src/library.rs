@@ -263,6 +263,71 @@ pub async fn library_write(app: tauri::AppHandle, rel: String, data: String) -> 
   .map_err(|e| e.to_string())?
 }
 
+/// The hidden temporary file a document is written to before it takes the real one's place.
+fn temp_beside(path: &Path) -> PathBuf {
+  path.with_file_name(format!(".{}.tmp", path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()))
+}
+
+/// The same write as `library_write`, handed over in pieces (see `write_document_begin` in lib.rs for why): `begin` starts the hidden
+/// temporary file, each `chunk` (base64) is appended to it, `commit` renames it over the real file, `abort` drops it. The real file
+/// is not touched until `commit`, which is one step, so a cut leaves the old document or the new one.
+#[tauri::command]
+pub async fn library_write_begin(app: tauri::AppHandle, rel: String) -> Result<(), String> {
+  let (base, _) = root(&app)?;
+  let path = resolve(&base, &rel)?;
+  if path == base || path.is_dir() {
+    return Err("ahí no se puede guardar un archivo".into());
+  }
+  tauri::async_runtime::spawn_blocking(move || {
+    if !path.parent().is_some_and(|p| p.is_dir()) {
+      return Err("la carpeta ya no existe".to_string());
+    }
+    fs::File::create(temp_beside(&path)).map(|_| ()).map_err(|e| format!("no se pudo escribir: {e}"))
+  })
+  .await
+  .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn library_write_chunk(app: tauri::AppHandle, rel: String, data: String) -> Result<(), String> {
+  use base64::Engine;
+  use std::io::Write;
+  let (base, _) = root(&app)?;
+  let path = resolve(&base, &rel)?;
+  tauri::async_runtime::spawn_blocking(move || {
+    let bytes = base64::engine::general_purpose::STANDARD.decode(data.as_bytes()).map_err(|e| format!("el archivo preparado no es válido: {e}"))?;
+    let mut tmp = fs::OpenOptions::new().append(true).open(temp_beside(&path)).map_err(|e| format!("no se pudo escribir: {e}"))?;
+    tmp.write_all(&bytes).map_err(|e| format!("no se pudo escribir: {e}"))
+  })
+  .await
+  .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn library_write_commit(app: tauri::AppHandle, rel: String) -> Result<(), String> {
+  let (base, _) = root(&app)?;
+  let path = resolve(&base, &rel)?;
+  tauri::async_runtime::spawn_blocking(move || {
+    let tmp = temp_beside(&path);
+    let flushed = fs::OpenOptions::new().append(true).open(&tmp).and_then(|f| f.sync_all());
+    flushed.map_err(|e| format!("no se pudo escribir: {e}"))?;
+    fs::rename(&tmp, &path).map_err(|e| {
+      let _ = fs::remove_file(&tmp);
+      format!("no se pudo guardar: {e}")
+    })
+  })
+  .await
+  .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn library_write_abort(app: tauri::AppHandle, rel: String) -> Result<(), String> {
+  let (base, _) = root(&app)?;
+  let path = resolve(&base, &rel)?;
+  let _ = fs::remove_file(temp_beside(&path));
+  Ok(())
+}
+
 /// Open the system's file explorer on a folder of the library (the folder holding it, when `rel` is a file). Not on Android.
 #[tauri::command]
 pub async fn library_reveal(app: tauri::AppHandle, rel: String) -> Result<(), String> {

@@ -3,6 +3,7 @@
  * so the person chooses where a file goes and which one to open. In a plain browser the File System Access API is
  * used where it exists, and a download otherwise.
  */
+import { writeInChunks } from './chunked-write';
 
 export interface FileFilter {
   name: string;
@@ -171,14 +172,22 @@ function toBase64(blob: Blob): Promise<string> {
 
 /**
  * Android's WebView cannot hand a request body to the native side through Tauri's fast channel, so Tauri sends the bytes as
- * JSON text, one number per byte, and the native side reads them back as one JSON value per byte. A 50 MB document is then
- * ~200 MB of text that freezes the page for a long time and can run the tablet out of memory. Here the file travels as one
- * base64 string (a third bigger than the file, not four times) and `write_document` (src-tauri) decodes and writes it.
+ * JSON text. The file goes as base64 text (a third bigger than the file, not four times) and, since the whole document as one
+ * string froze the window on a tablet, in pieces of about a megabyte (see chunked-write.ts). `write_document_*` (src-tauri) keeps
+ * a whole copy before touching the file, so a cut in the middle of the write is finished at the next start.
  */
 async function writeOnAndroid(path: string, blob: Blob): Promise<void> {
-  const data = await toBase64(blob);
   const { invoke } = await import('@tauri-apps/api/core');
-  await invoke('write_document', { path, data });
+  await writeInChunks(
+    blob,
+    {
+      begin: () => invoke<string>('write_document_begin', { path }),
+      chunk: (id, data) => invoke('write_document_chunk', { id, data }),
+      commit: (id) => invoke('write_document_commit', { id, path }),
+      abort: (id) => invoke('write_document_abort', { id }),
+    },
+    toBase64,
+  );
 }
 
 /**

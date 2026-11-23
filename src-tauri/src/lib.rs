@@ -217,6 +217,65 @@ async fn write_document(app: tauri::AppHandle, path: String, data: String) -> Re
   .map_err(|e| e.to_string())?
 }
 
+/// Only a plain key made by `write_document_begin` names a copy in the journal (never a path).
+fn check_write_id(id: &str) -> Result<(), String> {
+  if id.len() == 16 && id.bytes().all(|b| b.is_ascii_hexdigit()) {
+    Ok(())
+  } else {
+    Err("identificador de guardado no válido".into())
+  }
+}
+
+fn check_document_path(path: &str) -> Result<(), String> {
+  if !cfg!(target_os = "android") {
+    return Err("write_document is only available on Android".into());
+  }
+  if !path.starts_with("content://") {
+    return Err("write_document only writes documents chosen with the system picker".into());
+  }
+  Ok(())
+}
+
+/// The same write as `write_document`, handed over in pieces so that no one message is huge: a document sent as one string made the
+/// whole window stop on a tablet while the web view built, copied and sent it. `begin` starts, each `chunk` is the next piece (base64),
+/// `commit` writes the file from what was received. The file is not touched until `commit`.
+#[tauri::command]
+async fn write_document_begin(app: tauri::AppHandle, path: String) -> Result<String, String> {
+  check_document_path(&path)?;
+  tauri::async_runtime::spawn_blocking(move || write_journal(&app)?.begin(&path)).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn write_document_chunk(app: tauri::AppHandle, id: String, data: String) -> Result<(), String> {
+  use base64::Engine;
+  check_write_id(&id)?;
+  tauri::async_runtime::spawn_blocking(move || {
+    let bytes = base64::engine::general_purpose::STANDARD.decode(data.as_bytes()).map_err(|e| format!("el archivo preparado no es válido: {e}"))?;
+    write_journal(&app)?.append(&id, &bytes)
+  })
+  .await
+  .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn write_document_commit(app: tauri::AppHandle, id: String, path: String) -> Result<(), String> {
+  check_document_path(&path)?;
+  check_write_id(&id)?;
+  tauri::async_runtime::spawn_blocking(move || write_journal(&app)?.commit(&id, &path, || open_document(&app, &path))).await.map_err(|e| e.to_string())?
+}
+
+/// The save was cancelled or failed while sending: the pieces already received are dropped (the file was never touched).
+#[tauri::command]
+async fn write_document_abort(app: tauri::AppHandle, id: String) -> Result<(), String> {
+  check_write_id(&id)?;
+  tauri::async_runtime::spawn_blocking(move || {
+    write_journal(&app)?.abort(&id);
+    Ok(())
+  })
+  .await
+  .map_err(|e| e.to_string())?
+}
+
 /// Finish the writes that were cut the last time (Android): each one is written again from the copy kept before it began. Called
 /// when the app starts; says which files were completed and which could not be yet.
 #[tauri::command]
@@ -299,7 +358,7 @@ pub fn run() {
   builder
     .plugin(tauri_plugin_dialog::init())
     .plugin(doc_picker())
-    .invoke_handler(tauri::generate_handler![build_info, pick_document, pick_documents, create_document, write_document, recover_interrupted_writes, write_file_safe, quit_app, android_update_check, android_update_install, library::library_info, library::library_list, library::library_mkdir, library::library_move, library::library_copy, library::library_remove, library::library_read, library::library_read_range, library::library_write, library::library_reveal, library::library_request_access, settings::settings_read, settings::settings_write])
+    .invoke_handler(tauri::generate_handler![build_info, pick_document, pick_documents, create_document, write_document, write_document_begin, write_document_chunk, write_document_commit, write_document_abort, recover_interrupted_writes, write_file_safe, quit_app, android_update_check, android_update_install, library::library_info, library::library_list, library::library_mkdir, library::library_move, library::library_copy, library::library_remove, library::library_read, library::library_read_range, library::library_write, library::library_write_begin, library::library_write_chunk, library::library_write_commit, library::library_write_abort, library::library_reveal, library::library_request_access, settings::settings_read, settings::settings_write])
     .plugin(tauri_plugin_fs::init())
     .setup(|app| {
       if cfg!(debug_assertions) {

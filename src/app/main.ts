@@ -131,14 +131,16 @@ import { applyUiScale } from '../ui/ui-scale';
 import { applyInitialTouchUi, setTouchUi, touchUi } from '../ui/touch-mode';
 import { openColorSettings } from '../ui/color-settings';
 import { createColorStores } from '../ui/palettes/color';
-import { openLayerSettings, openPreferences, openShortcutSettings } from '../ui/dialogs';
+import { openLayerSettings, openShortcutSettings } from '../ui/dialogs';
+import { openPreferencesWindow } from '../ui/preferences-window';
+import type { Values as PrefValues } from '../ui/prefs-model';
 import { openResolution } from './resolution-ui';
 import { LEFT_EXTRA_GROUPS, PALETTE_SPECS, RIGHT_GROUPS } from '../ui/spec/palettes';
 import type { RGB } from '../ui/color';
 import { MENUS, dynamicMenus, type MenuEntry } from '../ui/spec/menus';
 import { Profiler } from './profiler';
 import { renderObjectsLayer } from './render-objects';
-import { applyPressureCurve, loadPrefs, noticeMs, sanitizePrefs, savePrefs, type Prefs } from './prefs';
+import { DEFAULT_PREFS, applyPressureCurve, loadPrefs, noticeMs, sanitizePrefs, savePrefs, type Prefs } from './prefs';
 import { createNotifier, type BusyHandle } from './notify';
 import { OPTION_CONTROLS, diffControls, parseControlStore, readControls, withControls, writeControls, type ControlElement, type ControlStore, type ControlValues } from './option-memory';
 import { mountNoticeView } from './notify-view';
@@ -2276,6 +2278,9 @@ const pngCodecs: OraCodecs = {
  * The document encoded in `format`, with the things that format could not keep. A "document" keeps the layers; an
  * "image" is the merged page (for a PSD that means a file with one merged layer, not the layered PSD).
  */
+/** The `.lienzo` file that was just written and the state of the page it holds (see `encodeAs`). */
+let justEncoded: { doc: Document; revision: number; blob: Blob } | null = null;
+
 async function encodeAs(kind: SaveKind, format: SaveFormat): Promise<{ blob: Blob; warnings: string[] }> {
   if (kind === 'image') {
     if (format === 'psd' || format === 'psb') {
@@ -2289,7 +2294,12 @@ async function encodeAs(kind: SaveKind, format: SaveFormat): Promise<{ blob: Blo
     case 'lienzo':
       // The page is taken now: the picture is made when the tiles are written, and another tab may be showing by then.
       const page = doc;
-      return { blob: await saveLienzo(page, { preview: () => previewPng(page) }), warnings: [] };
+      const revision = history.revision;
+      const blob = await saveLienzo(page, { preview: () => previewPng(page) });
+      // The autosave copy that follows a save is this very file: kept for it, so the page is not encoded and compressed a second time
+      // right after saving (on a tablet that doubled the time the window stood still).
+      justEncoded = { doc: page, revision, blob };
+      return { blob, warnings: [] };
     case 'clip': {
       // Edits a copy of the .clip the document was opened from (see clip-write.ts).
       const { value, warnings } = await exportClip(doc, { ...pngCodecs, loadSql });
@@ -4116,24 +4126,32 @@ commands.register('viewzoomout', () => zoomAround(0.8));
 commands.register('viewpixelsize', () => zoomTo(1));
 commands.register('view200percentsize', () => zoomTo(2));
 for (const id of ['viewwholesize', 'viewfitting', 'viewreset']) commands.register(id, fitView);
+/** Take new preferences into use (the Preferences window calls this at each change): keep them, and apply what they set. Returns how they were really kept. */
+function applyPreferences(next: PrefValues): PrefValues {
+  prefs = sanitizePrefs(next);
+  const saved = savePrefs(localStorage, prefs);
+  // Every open document keeps its own history (the open one's parked entry may be stale, so it is listed too).
+  const pruned = applyLimits([history, ...sessions.map((s) => s.history)], prefs.historySteps, prefs.undoMemoryMb * 1024 * 1024);
+  applyUiScale(prefs.uiScale);
+  // The toolbar checkbox is a per-session switch; the preference sets where it starts, so mirror it now too.
+  fingerDraws = prefs.fingerDraws;
+  input('finger-draws').checked = fingerDraws;
+  canvas.style.cursor = cursorFor(tool);
+  refreshUi();
+  drawOverlay();
+  const notice = [limitsNotice(pruned), saved ? null : 'No se pudieron guardar las preferencias: valdrán solo hasta cerrar la aplicación.'].filter(Boolean).join(' ');
+  if (notice) setStatus(notice);
+  return { ...prefs };
+}
 commands.register('applicationpreference', {
-  run: async () => {
-    const edited = await openPreferences({ ...prefs }, memorySummary(memoryFigures(), processMemory.value));
-    if (!edited) return;
-    prefs = sanitizePrefs(edited);
-    const saved = savePrefs(localStorage, prefs);
-    // Every open document keeps its own history (the open one's parked entry may be stale, so it is listed too).
-    const pruned = applyLimits([history, ...sessions.map((s) => s.history)], prefs.historySteps, prefs.undoMemoryMb * 1024 * 1024);
-    applyUiScale(prefs.uiScale);
-    // The toolbar checkbox is a per-session switch; the preference sets where it starts, so mirror it now too.
-    fingerDraws = prefs.fingerDraws;
-    input('finger-draws').checked = fingerDraws;
-    canvas.style.cursor = cursorFor(tool);
-    refreshUi();
-    drawOverlay();
-    const notice = [limitsNotice(pruned), saved ? null : 'No se pudieron guardar las preferencias: valdrán solo hasta cerrar la aplicación.'].filter(Boolean).join(' ');
-    if (notice) setStatus(notice);
-  },
+  run: () =>
+    openPreferencesWindow({
+      values: { ...prefs },
+      defaults: { ...DEFAULT_PREFS },
+      memory: memorySummary(memoryFigures(), processMemory.value),
+      apply: applyPreferences,
+      actions: { shortcuts: () => void openShortcutSettings(), updates: () => commands.run('helpupdates'), about: () => commands.run('applicationabout') },
+    }),
 });
 commands.register('applicationshortcutsetting', () => void openShortcutSettings());
 // Only when the person chooses it, and after asking: the program never goes looking for updates on its own.
@@ -4594,7 +4612,12 @@ const serialOf = (h: History): number => {
   return serials;
 };
 const autosave = startAutosave({
-  save: () => saveLienzo(doc),
+  save: () => {
+    // Right after a save of this very state the file itself is the copy: no second encoding. Dropped as soon as the page has changed.
+    if (justEncoded && justEncoded.doc === doc && justEncoded.revision === history.revision) return Promise.resolve(justEncoded.blob);
+    justEncoded = null;
+    return saveLienzo(doc);
+  },
   // Saving, renaming or saving elsewhere changes what the copy says (unsaved or not, which file), so they change the stamp too.
   stamp: () => `${serialOf(history)}:${history.revision}:${isDirty() ? 1 : 0}:${docName}:${docFile?.name ?? ''}`,
   busy: () => !!stroke || transformUi.active || selUi.dragging,

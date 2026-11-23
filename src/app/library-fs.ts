@@ -3,6 +3,7 @@
  * Windows, the app's folder on shared storage on Android); in a plain browser it is the page's private file system (OPFS), so the
  * same home screen works while developing. Both answer to the same small interface, with paths relative to the library folder.
  */
+import { writeInChunks } from './chunked-write';
 import { baseRel, joinRel, nameClash, parentRel, type LibEntry } from './library';
 
 /** Where the library is, for the person to find it. */
@@ -82,9 +83,18 @@ function nativeFs(): LibraryFs {
     async readRange(rel, start, end) {
       return new Blob([await call<ArrayBuffer>('library_read_range', { rel, start, end })]);
     },
-    async write(rel, data) {
-      await call('library_write', { rel, data: await toBase64(data) });
-    },
+    // In pieces (see chunked-write.ts): the whole document as one string froze the window on a tablet.
+    write: (rel, data) =>
+      writeInChunks(
+        data,
+        {
+          begin: async () => void (await call('library_write_begin', { rel })),
+          chunk: (_, piece) => call('library_write_chunk', { rel, data: piece }),
+          commit: () => call('library_write_commit', { rel }),
+          abort: () => call('library_write_abort', { rel }),
+        },
+        toBase64,
+      ),
   };
 }
 

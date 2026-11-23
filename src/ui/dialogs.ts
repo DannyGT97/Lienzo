@@ -1,6 +1,5 @@
 import { commands } from './commands';
 import { MENUS, type MenuEntry } from './spec/menus';
-import { UI_SCALE_MAX, UI_SCALE_MIN, UI_SCALE_PRESETS, UI_SCALE_STEP } from './ui-scale-model';
 import { snapValue } from '../engine/brush-params';
 import { valueField } from './value-field';
 
@@ -193,114 +192,6 @@ function paged(title: string, pages: Page[], buttons: 'close' | 'okcancel', draf
     true,
     onOk,
   );
-}
-
-// ---- Preferences ---------------------------------------------------------------------------------------
-
-const PREFERENCES: Page[] = [
-  {
-    id: 'tools',
-    title: 'Herramientas',
-    note: 'Cómo reaccionan las herramientas de dibujo.',
-    fields: [
-      { kind: 'check', label: 'Usar la presión del lápiz', value: true, key: 'usePressure' },
-      { kind: 'check', label: 'Permitir dibujar con el dedo al iniciar', value: true, key: 'fingerDraws' },
-      { kind: 'select', label: 'Curva de presión', options: ['Predeterminada', 'Suave', 'Firme'], ids: ['default', 'soft', 'firm'], key: 'pressureCurve' },
-      { kind: 'check', label: 'Corrección de trazo en tiempo real', value: true },
-      { kind: 'check', label: 'Cambiar a borrador con el extremo del lápiz', value: true },
-    ],
-  },
-  {
-    id: 'canvas',
-    title: 'Lienzo',
-    fields: [
-      { kind: 'select', label: 'Color de fondo del área de trabajo', options: ['Gris oscuro', 'Gris', 'Negro'] },
-      { kind: 'check', label: 'Mostrar el tablero de transparencia', value: true },
-      { kind: 'select', label: 'Calidad de la vista al acercar', options: ['Suavizada', 'Píxeles'] },
-      { kind: 'check', label: 'Desplazar con la rueda del ratón', value: false },
-    ],
-  },
-  {
-    id: 'interface',
-    title: 'Interfaz',
-    fields: [
-      { kind: 'select', label: 'Idioma', options: ['Español'] },
-      { kind: 'select', label: 'Tema', options: ['Oscuro', 'Claro'] },
-      { kind: 'range', label: 'Escala de la interfaz', value: 100, unit: '%', key: 'uiScale', min: UI_SCALE_MIN, max: UI_SCALE_MAX, step: UI_SCALE_STEP, presets: UI_SCALE_PRESETS },
-      { kind: 'select', label: 'Tamaño de los iconos', options: ['Pequeño', 'Mediano', 'Grande'] },
-      { kind: 'check', label: 'Mostrar pistas al pasar el cursor', value: true },
-      { kind: 'select', label: 'Duración de los avisos', options: ['Rápida (2 s)', 'Normal (3 s)', 'Lenta (4 s)', 'Muy lenta (7 s)'], ids: ['fast', 'normal', 'slow', 'slower'], key: 'noticeSpeed' },
-    ],
-  },
-  {
-    id: 'cursor',
-    title: 'Cursor',
-    fields: [
-      { kind: 'select', label: 'Forma del cursor de dibujo', options: ['Círculo del tamaño del pincel', 'Cruz', 'Punto'] },
-      { kind: 'check', label: 'Mostrar el contorno del pincel', value: true, key: 'brushOutline' },
-      { kind: 'check', label: 'Mostrar una cruz en el centro', value: false, key: 'brushCrosshair' },
-    ],
-  },
-  {
-    id: 'layer',
-    title: 'Capas',
-    fields: [
-      { kind: 'select', label: 'Nombre de las capas nuevas', options: ['Capa N', 'Sin número'] },
-      { kind: 'check', label: 'Mostrar miniaturas de capa', value: true },
-      { kind: 'select', label: 'Tamaño de las miniaturas', options: ['Pequeña', 'Mediana', 'Grande'] },
-    ],
-  },
-  {
-    id: 'units',
-    title: 'Reglas y unidades',
-    fields: [
-      { kind: 'select', label: 'Unidad de longitud', options: ['Píxeles', 'Milímetros', 'Centímetros', 'Pulgadas', 'Puntos'] },
-      { kind: 'select', label: 'Unidad del texto', options: ['Puntos', 'Q', 'Píxeles'] },
-      { kind: 'number', label: 'Resolución por defecto', value: 300, unit: 'ppp' },
-    ],
-  },
-  {
-    id: 'performance',
-    title: 'Rendimiento',
-    // The "Memoria" group is added when the dialog opens (see openPreferences), above these.
-    fields: [
-      { kind: 'heading', label: 'Deshacer' },
-      { kind: 'number', label: 'Cantidad de pasos de deshacer', value: 200, key: 'historySteps', min: 10, max: 1000 },
-      { kind: 'number', label: 'Memoria para deshacer', value: 256, unit: 'MB', key: 'undoMemoryMb', min: 32, max: 4096 },
-    ],
-  },
-  {
-    id: 'file',
-    title: 'Archivo',
-    fields: [
-      { kind: 'select', label: 'Formato de guardado', options: ['PSD (temporal)'] },
-      { kind: 'heading', label: 'Autoguardado' },
-      { kind: 'check', label: 'Guardar una copia de recuperación cada cierto tiempo', value: true, key: 'autosave' },
-      { kind: 'number', label: 'Intervalo', value: 15, unit: 'min', key: 'autosaveMinutes', min: 1, max: 120 },
-    ],
-  },
-  {
-    id: 'tablet',
-    title: 'Tableta',
-    fields: [
-      { kind: 'select', label: 'Interfaz del lápiz', options: ['Automática', 'Windows Ink', 'Wintab'] },
-      { kind: 'check', label: 'Ignorar la palma de la mano', value: true },
-      { kind: 'check', label: 'Gestos táctiles (pellizcar para acercar)', value: true },
-    ],
-  },
-];
-
-/** Resolves with the edited values when the user accepts, or null on cancel. The caller validates and applies them. */
-export async function openPreferences(current: Draft, memory: [string, string][] = []): Promise<Draft | null> {
-  const draft: Draft = { ...current };
-  let accepted = false;
-  // Read when the dialog opens; information, not settings. The "Memoria" group sits above "Deshacer".
-  const memoryFields: Field[] = memory.map(([label, value]) => ({ kind: 'info', label, value }));
-  const pages: Page[] = PREFERENCES.map((p) =>
-    p.id === 'performance' && memory.length ? { ...p, fields: [{ kind: 'heading', label: 'Memoria' }, ...memoryFields, ...p.fields] } : p,
-  );
-  await paged('Preferencias', pages, 'okcancel', draft, () => (accepted = true));
-  return accepted ? draft : null;
 }
 
 // ---- Canvas properties, resolution, layer properties ---------------------------------------------------------
