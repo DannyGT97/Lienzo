@@ -20,6 +20,7 @@ npm run device -- desktop setup,zoom --layers 20
 | `parity` | El compositor da la misma imagen, byte a byte, con y sin sus atajos (copia parcial, sombreado por tile), a varios zooms. |
 | `zoom` / `pan` | Tiempo de GPU por fotograma y fotogramas largos con zoom rápido y paneo. |
 | `stress` | Acciones aleatorias (capas, deshacer, trazos, relleno, selecciones, vista…): sin errores, sin perder el contexto GL. `--steps`, `--seed`. |
+| `fillcost` | El bote en una página con muchas capas: un toque recién elegida la herramienta (en frío) y con la página ya preparada. Se usa después de `setup`. |
 | `strokecost` | Coste por muestra del lápiz según tamaño y dureza, y de los fotogramas mientras se pinta. |
 
 Los límites están en cada prueba (`check(...)`), distintos para tableta y escritorio. `--out informe.json` guarda todo.

@@ -1,7 +1,5 @@
-Guardar ya no congela la tableta, y Lienzo te pregunta antes de cerrar con cambios sin guardar.
+Arreglos de la tableta: las opciones de Preferencias se ven bien y los avisos de falta de memoria ya no se repiten.
 
-- Guardar sin bloqueos en Android: el documento se envía a trozos pequeños, así que la ventana sigue respondiendo mientras se guarda, y ya no se codifica dos veces justo después de guardar.
-- Guardado a prueba de cortes: en Android, antes de tocar tu archivo se guarda una copia completa y, si la batería o un cierre forzado interrumpen el guardado, Lienzo lo termina al abrir de nuevo. En Windows el archivo se escribe aparte y se renombra, así que nunca queda a medias.
-- Aviso al salir: si hay cambios sin guardar, Lienzo siempre pregunta antes de cerrar (botón de cerrar en escritorio, botón atrás en Android), aunque exista el autoguardado.
-- Preferencias renovadas: buscador, secciones, cambios que se aplican al momento, botón para volver al valor por defecto de cada opción y vista pensada para el móvil. Incluye la nueva sección «Archivo y copias» para el autoguardado.
-- Fallos corregidos: guardar y cambiar de pestaña a la vez marcaba la pestaña equivocada y ponía la miniatura de otro documento; el autoguardado perdía lo último al pasar a segundo plano; un PSD dañado podía agotar la memoria; renombrar «Foo» a «foo» podía sobrescribir otro archivo; la descarga de actualizaciones comprueba mejor la dirección.
+- Preferencias en pantalla táctil: los interruptores se estiraban en la tableta; ahora tienen su forma y son un poco más grandes para pulsarlos.
+- Falta de memoria: cuando la tableta se queda sin memoria, Lienzo lo cuenta con palabras («se ha acabado la memoria disponible», con qué hacer) en vez del mensaje técnico, y no apila el mismo aviso una y otra vez.
+- Mediciones en tableta: el guardado de un documento de 36 capas no deja la ventana parada más de ~300 ms, y el bote de pintura con 38 capas tarda ~220 ms.

@@ -108,6 +108,7 @@ import { createPreviewer, createThumbs, previewPng } from './library-preview';
 import { joinRel, uniqueName } from './library';
 import { createSaveFlow } from './save-flow';
 import { createExitGuard, installExitHooks } from './exit-guard';
+import { createNoticeFilter } from './error-report';
 import { describeRecovery, type RecoveredWrite } from './write-recovery';
 import { flushSettings } from './settings-store';
 import { deniedNotice, failedNotice, savedNotice, type NoticeText, type SaveStep, type SavedResult } from './save-notice';
@@ -346,11 +347,14 @@ const isDirty = (): boolean => history.revision !== savedRevision;
 let autosaveKey = newAutosaveKey();
 const statusInfo = (): StatusInfo => ({ zoom: view.scale, width: doc.width, height: doc.height, dpi: doc.dpi, memory: formatBytes(history.memory), title: docTitle, dirty: isDirty(), tabs: tabInfos(), empty: workspaceEmpty });
 const updateStatusBar = (): void => statusBar?.update(statusInfo());
+const noticeFor = createNoticeFilter();
 function reportError(msg: string): void {
   errors.push(msg);
   if (errors.length > 20) errors.shift();
   (window as unknown as { __errors: string[] }).__errors = errors;
-  notify.error(msg);
+  // Out of memory is told in words and what to do; the same error repeating is shown once.
+  const text = noticeFor(msg);
+  if (text) notify.error(text);
 }
 window.addEventListener('error', (e) => reportError(e.message || String(e.error)));
 window.addEventListener('unhandledrejection', (e) => reportError(String((e.reason as Error | undefined)?.message ?? e.reason)));

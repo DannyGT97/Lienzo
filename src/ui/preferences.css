@@ -55,7 +55,8 @@ dialog.pw-dialog[open] { display: grid; grid-template-rows: auto minmax(0, 1fr) 
 .pw-row.changed .pw-rst { display: inline-block; }
 .pw-rst:hover { background: #46464c; color: var(--text); }
 
-.pw-sw { width: 42px; height: 24px; border-radius: 12px; background: #55555c; border: 0; position: relative; transition: background 0.15s; flex: none; padding: 0; cursor: pointer; }
+/* min-width/min-height 0: on a touch screen every button is given a minimum height of 40 px (studio.css), which stretched the switch into a tall box. */
+.pw-sw { min-width: 0; min-height: 0; width: 42px; height: 24px; border-radius: 12px; background: #55555c; border: 0; position: relative; transition: background 0.15s; flex: none; padding: 0; cursor: pointer; }
 .pw-sw::after { content: ""; position: absolute; top: 3px; left: 3px; width: 18px; height: 18px; border-radius: 50%; background: #fff; transition: translate 0.15s; }
 .pw-sw[aria-checked="true"] { background: #3f6fbf; }
 .pw-sw[aria-checked="true"]::after { translate: 18px 0; }
@@ -107,3 +108,11 @@ dialog.pw-dialog.pw-narrow { width: calc(100 * var(--vw)); height: calc(100 * va
 .pw-narrow .pw-sw[aria-checked="true"]::after { translate: 20px 0; }
 .pw-narrow .pw-seg button { padding: 9px 13px; }
 .pw-narrow .pw-btn { min-height: 42px; }
+
+/* A touch screen (a tablet, even when the window is wide): the switch is a little bigger to hit, with the same shape. */
+html.touch-ui .pw-sw { width: 48px; height: 28px; border-radius: 14px; }
+html.touch-ui .pw-sw::after { width: 22px; height: 22px; }
+html.touch-ui .pw-sw[aria-checked="true"]::after { translate: 20px 0; }
+html.touch-ui .pw-sw.small { width: 40px; height: 24px; border-radius: 12px; }
+html.touch-ui .pw-sw.small::after { width: 18px; height: 18px; }
+html.touch-ui .pw-sw.small[aria-checked="true"]::after { translate: 16px 0; }

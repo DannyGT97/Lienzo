@@ -1,6 +1,6 @@
 [package]
 name = "lienzo"
-version = "0.1.5"
+version = "0.1.6"
 description = "Editor de dibujo y manga"
 authors = ["DannyGT97"]
 license = ""
