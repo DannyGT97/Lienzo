@@ -1,6 +1,6 @@
 import { inflateSync } from 'node:zlib';
 import { describe, expect, it } from 'vitest';
-import { encodePng } from './png-encode';
+import { encodePng, encodePngRows } from './png-encode';
 
 /** Reads back what the writer made, with the format's own rules: signature, chunk checksums, header, filtered rows. */
 function decode(png: Uint8Array): { width: number; height: number; rgba: Uint8Array } {
@@ -63,5 +63,30 @@ describe('encodePng', () => {
     const back = decode(png);
     expect(Array.from(back.rgba.subarray(0, 4))).toEqual([10, 200, 30, 0]);
     expect(Array.from(back.rgba.subarray(4 * (w + 1), 4 * (w + 1) + 4))).toEqual([255, 0, 0, 128]);
+  });
+
+  it('writes the Sub filter from rows made on demand, and reads back to the same pixels', async () => {
+    const w = 37;
+    const h = 600; // more than one step of rows
+    const px = new Uint8ClampedArray(w * h * 4).map((_, i) => ((i * 53) ^ (i >> 5)) & 255);
+    const asked: Array<[number, number]> = [];
+    const png = await encodePngRows(w, h, async (from, to) => (asked.push([from, to]), px.subarray(from * w * 4, to * w * 4)), undefined, { sub: true });
+    expect(asked).toEqual([[0, 256], [256, 512], [512, 600]]);
+    // Read back by hand: undo the filter of every row.
+    const idat: Uint8Array[] = [];
+    for (let at = 8; at < png.length; ) {
+      const len = new DataView(png.buffer, png.byteOffset).getUint32(at);
+      if (String.fromCharCode(...png.subarray(at + 4, at + 8)) === 'IDAT') idat.push(png.subarray(at + 8, at + 8 + len));
+      at += 12 + len;
+    }
+    const raw = inflateSync(Buffer.concat(idat));
+    const row = w * 4;
+    for (let y = 0; y < h; y++) {
+      expect(raw[y * (row + 1)]).toBe(1);
+      for (let i = 0; i < row; i++) {
+        const left = i >= 4 ? px[y * row + i - 4]! : 0;
+        expect((raw[y * (row + 1) + 1 + i]! + left) & 255).toBe(px[y * row + i]);
+      }
+    }
   });
 });

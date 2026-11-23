@@ -2,6 +2,7 @@ import { adjustLut, applyAdjustLut, type AdjustLut } from './adjust';
 import { ALPHA_ADD_MODES, blendColor, type RGB } from './blend';
 import type { Document, Layer } from './document';
 import { layerTree, type TreeNode } from './layer-tree';
+import type { Tick } from './cooperate';
 import { TILE, tileRange, type Rect } from './tiles';
 
 const T2 = TILE * TILE;
@@ -405,6 +406,48 @@ export function flattenRegion(doc: Document, region: Rect, opts: CompositeOption
   return out;
 }
 
+/** Opaque pixels of one colour (a paper layer's content), filled by the engine instead of a loop of a few million steps. */
+export function paperPixels(width: number, height: number, c: readonly number[]): Uint8ClampedArray {
+  const out = new Uint8ClampedArray(width * height * 4);
+  if (LITTLE) new Uint32Array(out.buffer).fill(((255 << 24) | (c[2]! << 16) | (c[1]! << 8) | c[0]!) >>> 0);
+  else
+    for (let i = 0; i < out.length; i += 4) {
+      out[i] = c[0]!;
+      out[i + 1] = c[1]!;
+      out[i + 2] = c[2]!;
+      out[i + 3] = 255;
+    }
+  return out;
+}
+
+/** Rows merged between two turns: a whole tile of a page of many layers took 150 ms on a tablet, which a window feels as a stutter. */
+const PIECE_ROWS = 48;
+
+/**
+ * `flattenRegion` in pieces (a strip of one tile), with a turn given to the window between them (see cooperate.ts): the same pixels,
+ * for the places where merging a whole page in one go made it stand still (saving as an image, a PSD or an OpenRaster file).
+ */
+export async function flattenRegionAsync(doc: Document, region: Rect, opts: CompositeOptions, tick: Tick): Promise<Uint8ClampedArray> {
+  const x0 = Math.max(0, region.x);
+  const y0 = Math.max(0, region.y);
+  const x1 = Math.min(doc.width, region.x + region.w);
+  const y1 = Math.min(doc.height, region.y + region.h);
+  const rw = Math.max(0, x1 - x0);
+  const out = new Uint8ClampedArray(rw * Math.max(0, y1 - y0) * 4);
+  if (x1 <= x0 || y1 <= y0) return out;
+  for (let y = y0; y < y1; ) {
+    const h = Math.min(y1, (Math.floor(y / TILE) + 1) * TILE, y + PIECE_ROWS) - y;
+    for (let x = x0; x < x1; x = (Math.floor(x / TILE) + 1) * TILE) {
+      const w = Math.min(x1, (Math.floor(x / TILE) + 1) * TILE) - x;
+      const piece = flattenRegion(doc, { x, y, w, h }, opts);
+      for (let r = 0; r < h; r++) out.set(piece.subarray(r * w * 4, (r + 1) * w * 4), ((y - y0 + r) * rw + (x - x0)) * 4);
+      await tick();
+    }
+    y += h;
+  }
+  return out;
+}
+
 /** Flatten the whole document. Only sensible for documents that fit in memory as one buffer. */
 export function flatten(doc: Document, opts: CompositeOptions = {}): Uint8ClampedArray {
   return flattenRegion(doc, { x: 0, y: 0, w: doc.width, h: doc.height }, opts);
@@ -531,21 +574,41 @@ export function layerThumbnail(layer: Layer, docW: number, docH: number, w: numb
  * area and the number of layers, not with the page size, and thin lines never vanish.
  */
 export function thumbnail(doc: Document, w: number, h: number, opts: CompositeOptions = {}): Uint8ClampedArray {
+  const steps = thumbnailSteps(doc, w, h, opts);
+  for (;;) {
+    const next = steps.next();
+    if (next.done) return next.value;
+  }
+}
+
+/** `thumbnail` that gives the window turns between layers and every few rows of the picture (see cooperate.ts). */
+export async function thumbnailAsync(doc: Document, w: number, h: number, opts: CompositeOptions, tick: Tick): Promise<Uint8ClampedArray> {
+  const steps = thumbnailSteps(doc, w, h, opts);
+  for (;;) {
+    const next = steps.next();
+    if (next.done) return next.value;
+    await tick();
+  }
+}
+
+/** The work of `thumbnail`, which pauses (yields) where it can be interrupted. */
+function* thumbnailSteps(doc: Document, w: number, h: number, opts: CompositeOptions): Generator<void, Uint8ClampedArray> {
   const out = new Uint8ClampedArray(w * h * 4);
   const cur = { i: 0 };
   const cellX = (): number => Math.min(doc.width - 1, Math.floor(((cur.i % w) + 0.5) * (doc.width / w)));
   const cellY = (): number => Math.min(doc.height - 1, Math.floor((Math.floor(cur.i / w) + 0.5) * (doc.height / h)));
-  const build = (nodes: readonly TreeNode[]): PNode[] => {
+  const build = function* (nodes: readonly TreeNode[]): Generator<void, PNode[]> {
     const plan: PNode[] = [];
     for (const tn of nodes) {
       const l = tn.layer;
       if (opts.output && !shownInOutput(l)) continue;
       const maskAt = l.mask && l.mask.enabled ? () => layerMaskAt(l, cellX(), cellY()) : undefined;
-      if (l.kind === 'folder') plan.push({ layer: l, children: build(tn.children), read: noRead, maskAt });
+      if (l.kind === 'folder') plan.push({ layer: l, children: yield* build(tn.children), read: noRead, maskAt });
       else if (l.kind === 'paper') plan.push({ layer: l, children: [], read: paperReader(l), maskAt });
       else if (l.kind === 'adjust') plan.push({ layer: l, children: [], read: noRead, maskAt, adjust: adjustOf(l) });
       else {
         const d = downsampleLayer(l, doc.width, doc.height, w, h, Math.max(1, Math.floor(opts.sample ?? 1)));
+        yield;
         plan.push({
           layer: l,
           children: [],
@@ -562,10 +625,11 @@ export function thumbnail(doc: Document, w: number, h: number, opts: CompositeOp
     }
     return plan;
   };
-  const plan = build(layerTree(doc.layers));
+  const plan = yield* build(layerTree(doc.layers));
   const acc = [0, 0, 0, 0];
   const st: Scratch[] = [];
   for (let i = 0; i < w * h; i++) {
+    if ((i & 511) === 511) yield;
     cur.i = i;
     acc[0] = acc[1] = acc[2] = acc[3] = 0;
     evalNodes(plan, acc, st, 0);

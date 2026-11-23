@@ -1,11 +1,15 @@
 import { adjustLut, isAdjustable, type AdjustLut } from '../engine/adjust';
 import type { Document, Layer } from '../engine/document';
 import { paintTarget } from '../engine/document';
-import { FILTERS, applyAreaFilter, applyPixelFilter, defaultValues, type FilterContext } from '../engine/filters';
+import { createTick } from '../engine/cooperate';
+import { applyAreaFilterAsync, applyPixelFilterAsync } from '../engine/filter-run';
+import { poolRunner } from '../engine/filter-pool';
+import { FILTERS, defaultValues, previewScale, type AreaFilter, type FilterContext, type PixelFilter } from '../engine/filters';
 import { combineCommands, patchCommand, type Command, type History } from '../engine/history';
 import { descendants } from '../engine/layer-tree';
 import { Selection } from '../engine/selection';
 import type { Rect } from '../engine/tiles';
+import type { TileRecorder } from '../engine/transform';
 
 export interface FiltersDeps {
   doc: () => Document;
@@ -22,6 +26,8 @@ export interface FiltersDeps {
   say: (msg: string) => void;
   /** The part of the page on screen right now (page coordinates), or null when it is not known. */
   viewRect: () => Rect | null;
+  /** A notice that stays up while something takes a while (it ends with `done`); left out in tests. */
+  busy?: (text: string) => { done(): void };
   /** The element the floating panel is placed in. */
   host: HTMLElement;
 }
@@ -55,9 +61,10 @@ export function previewRect(view: Rect | null, width: number, height: number, sc
  * sliders: every change shows the result on the layer at once, "Aplicar" keeps it as one undoable step and
  * "Cancelar" puts the layer back.
  *
- * While the sliders move, only what is on screen is filtered (a page can be many megapixels, the screen about one),
- * and at most one preview is made per frame however many slider events arrive. "Aplicar" then filters the whole
- * area. Own design (the references do not say how their previews are scheduled).
+ * While the sliders move, only what is on screen is filtered (a page can be many megapixels, the screen about one), piece by
+ * piece from the middle of the screen out, on the workers of the device (see engine/filter-run.ts): the window is never held, what
+ * is done shows at once, and a newer slider value stops the preview in progress and starts over. "Aplicar" then filters the whole
+ * area (nothing, if the preview already did). Own design (the references do not say how their previews are scheduled).
  */
 export function createFiltersUi(d: FiltersDeps): {
   readonly active: boolean;
@@ -73,25 +80,43 @@ export function createFiltersUi(d: FiltersDeps): {
     id: string;
     layers: Layer[];
     values: Record<string, number>;
-    /** What the preview did, one step per layer: undo it before showing the next one. */
+    /** What the previews did, one step per layer: undone before the next preview shows. */
     shown: Command[];
     /** The preview is the renderer applying the correction's table (nothing was filtered yet). */
     gpu: boolean;
     panel: HTMLElement;
     /** Stops the preview that is waiting to run, if any. */
     cancelWait: (() => void) | null;
-    /** How long the last preview took: heavy filters wait longer so the slider stays responsive. */
+    /** How long the last whole preview took: heavy filters wait longer between previews so the slider stays responsive. */
     cost: number;
-    /** How long filtering everything on screen took (0 until it has been done): decides whether a drag may use the small window. */
-    viewCost: number;
-    /** Completes the small-window preview with everything on screen once the slider rests. */
-    cancelSettle: (() => void) | null;
     /** The part of the page the preview has filtered: null = all of it (or nothing is known yet, before the first preview). */
     covered: Rect | null;
     /** Waits for the view to come to rest before the preview is made again where it moved to. */
     cancelView: (() => void) | null;
+    /** Counts the previews asked for: a preview that is not the latest stops at its next piece. */
+    ticket: number;
+    /** The session was cancelled: whatever is still being worked on is thrown away. */
+    dead: boolean;
+    /** "Aplicar" was pressed: the whole layer is being filtered. */
+    applying: boolean;
+    /** What each layer was before the filter (and the area it worked on), to go on from one pass to the next. */
+    recs: Map<Layer, { rec: TileRecorder; frame?: Rect }>;
+    /** What is on the layers is the filter on the whole of it, finished (so "Aplicar" has nothing left to do). */
+    settled: boolean;
   }
   let s: Session | null = null;
+
+  /**
+   * Filtering is done one after another, never two at once: a new session (or a new preview) waits for the one before it to put its
+   * pieces back or take them away, so it never reads a layer that is half filtered.
+   */
+  let chain: Promise<void> = Promise.resolve();
+  const unionRect = (a: Rect, b: Rect): Rect => {
+    const x0 = Math.min(a.x, b.x);
+    const y0 = Math.min(a.y, b.y);
+    return { x: x0, y: y0, w: Math.max(a.x + a.w, b.x + b.w) - x0, h: Math.max(a.y + a.h, b.y + b.h) - y0 };
+  };
+  const tick = createTick();
 
   /**
    * The layers a filter acts on: the ticked pixel layers that are visible and not locked; a folder stands for the pixel
@@ -116,40 +141,21 @@ export function createFiltersUi(d: FiltersDeps): {
   }
 
   /**
-   * Only when filtering everything on screen has proved slow does a drag preview just a window around the middle of
-   * the view (and say so); the slider coming to rest completes it, so what is on screen always ends up showing
-   * exactly what "Aplicar" will do.
+   * A preview covers the screen and a margin around it (a quarter of a screen each side), so zooming out a little or panning does not
+   * show the filter cut off at the old edge. It is made again only when the view has come to rest somewhere it does not reach. The
+   * pieces nearest to the middle of the screen come first, so the margin is only worked on once what is seen is done.
    */
-  /** A full-screen preview slower than this (ms) makes drags use the window. */
-  const SLOW_MS = 90;
-  /** How long the slider rests before the window preview is completed (ms). */
-  const SETTLE_MS = 160;
-  /**
-   * A preview covers the screen and a margin around it (half a screen each side), so zooming out a little or panning does not
-   * show the filter cut off at the old edge. It is made again only when the view has come to rest somewhere it does not reach.
-   */
-  const VIEW_MARGIN = 0.5;
+  const VIEW_MARGIN = 0.25;
   /** The margin is cut down so that the preview never works on more than this many pixels (beyond what is on screen). */
-  const WIDE_PIXELS = 5_000_000;
+  const WIDE_PIXELS = 3_000_000;
   /** How long the view must rest before a preview is made again for it (ms). */
   const VIEW_REST_MS = 200;
 
-  /**
-   * The area a preview works on: the selection (or the layer), cut down to what is on screen unless `all`, and
-   * (`window`) to a window around the middle of the view. `partial` says that what is on screen is not all filtered
-   * yet; what is off screen is not shown, so it does not count.
-   */
-  function areaOf(scope: PreviewScope, layer: Layer): { sel: Selection | null; partial: boolean; rect: Rect | null; limit?: Rect } {
-    const sel = d.selection();
+  /** The part of the page a preview works on (null = all of it): what is on screen and a margin, unless `all`. */
+  function targetOf(scope: PreviewScope, layer: Layer): Rect | null {
     const { width, height } = paintTarget(layer).surface;
-    let view = scope === 'all' ? null : d.viewRect();
-    if (view && scope === 'view') view = widen(view, width, height);
-    const r = previewRect(view, width, height, scope);
-    if (!r.rect) return { sel, partial: false, rect: null };
-    const shown = Selection.rect(width, height, r.rect);
-    if (sel) shown.combine(sel, 'intersect');
-    // With no selection of the person's, a neighbourhood filter is simply limited to the rectangle (no coverage to work out).
-    return { sel: shown, partial: r.partial, rect: r.rect, limit: sel ? undefined : r.rect };
+    const view = scope === 'all' ? null : d.viewRect();
+    return previewRect(view ? widen(view, width, height) : null, width, height, 'view').rect;
   }
 
   /** The view and a margin around it, as far as the pixel budget allows (never less than the view). */
@@ -163,11 +169,16 @@ export function createFiltersUi(d: FiltersDeps): {
     return { x, y, w: Math.min(width, Math.round(view.x + view.w * (1 + k))) - x, h: Math.min(height, Math.round(view.y + view.h * (1 + k))) - y };
   }
 
-  /** Take back what the last preview did, on every layer (the last one first). */
-  function undoShown(): void {
-    if (!s) return;
-    for (let i = s.shown.length - 1; i >= 0; i--) s.shown[i]!.undo();
-    s.shown = [];
+  /** Take back what the previews did on every layer (the last one first) and redraw where it was. */
+  function revert(session: Session): void {
+    const regions = session.shown.map((c) => c.region);
+    for (let i = session.shown.length - 1; i >= 0; i--) session.shown[i]!.undo();
+    session.shown = [];
+    for (const region of regions) {
+      if (!region) continue;
+      for (const layer of session.layers) d.refreshLayer(layer, region);
+      d.render(region);
+    }
   }
 
   /**
@@ -181,64 +192,136 @@ export function createFiltersUi(d: FiltersDeps): {
     return lut ? new Map(session.layers.map((l) => [l.id, lut])) : null;
   }
 
-  /** Show the filter with the current values (taking back the previous preview first). `cpuOnly`: really filter the pixels. */
-  function preview(scope: PreviewScope = 'view', cpuOnly = false): void {
-    if (!s) return;
-    const tables = cpuOnly ? null : tablesFor(s);
-    if (tables) {
-      undoShown();
-      s.gpu = true;
-      s.panel.querySelector<HTMLElement>('.note')!.hidden = true;
-      d.setPreview(tables);
-      return;
-    }
-    if (s.gpu) {
-      s.gpu = false;
+  const setNote = (session: Session, text: string | null): void => {
+    const note = session.panel.querySelector<HTMLElement>('.note');
+    if (!note) return;
+    note.hidden = text === null;
+    if (text !== null) note.textContent = text;
+  };
+
+  /**
+   * The filter on the layers, piece by piece; stops when a newer preview is asked for. A fresh preview takes the previous one back first;
+   * a `refine` pass goes on over what the one before it did (a preview made smaller, now made at full size) without showing the
+   * picture unfiltered in between. Returns whether a full-size pass should follow (this one was made smaller and finished).
+   */
+  async function work(session: Session, ticket: number, scope: PreviewScope, refine = false): Promise<boolean> {
+    const stop = (): boolean => session.dead || ticket !== session.ticket;
+    if (stop()) return false; // a newer preview was asked for while this one waited its turn
+    if (session.gpu) {
+      session.gpu = false;
       d.setPreview(null);
     }
-    const began = performance.now();
-    const { layers, id, values } = s;
-    undoShown();
-    const def = FILTERS[id]!;
-    let partial = false;
-    let covered: Rect | null = null;
-    const done: { layer: Layer; rect: Rect }[] = [];
-    for (const layer of layers) {
-      const surface = paintTarget(layer).surface;
-      const area = areaOf(scope, layer);
-      partial = partial || area.partial;
-      covered = area.rect;
-      let patch = null;
-      let rect: Rect | null = null;
-      if (def.kind === 'pixel') {
-        patch = applyPixelFilter(surface, layer.id, area.sel, def, values, d.colors());
-        rect = patch?.rect ?? null;
-      } else {
-        const r = applyAreaFilter(surface, layer.id, area.limit ? null : area.sel, def, values, d.colors(), area.limit);
-        if (r && 'tooLarge' in r) {
-          // Nothing is left half done: what was shown on the layers before this one is taken back.
-          undoShown();
-          for (const x of done) {
-            d.refreshLayer(x.layer, x.rect);
-            d.render(x.rect);
-          }
-          d.say('La zona es demasiado grande para este filtro: selecciona una parte más pequeña.');
-          return;
-        }
-        patch = r?.patch ?? null;
-        rect = r?.rect ?? null;
-      }
-      if (patch) s.shown.push(patchCommand(d.doc(), patch, def.title));
-      if (rect) {
-        done.push({ layer, rect });
-        d.refreshLayer(layer, rect);
-        d.render(rect);
-      }
+    let earlier: Rect[] = [];
+    if (refine) {
+      earlier = session.shown.map((c) => c.region).filter((r): r is Rect => !!r);
+      session.shown = []; // the patch of this pass holds the whole of the change (it goes on over the recorder of the last one)
+    } else {
+      revert(session);
+      session.recs.clear();
     }
-    s.panel.querySelector<HTMLElement>('.note')!.hidden = !partial;
-    s.covered = covered;
-    s.cost = performance.now() - began;
-    if (scope === 'view') s.viewCost = s.cost;
+    session.settled = false;
+    const began = performance.now();
+    const def = FILTERS[session.id]!;
+    const view = d.viewRect();
+    const near = view ? { x: view.x + view.w / 2, y: view.y + view.h / 2 } : undefined;
+    // What was written is drawn once a frame, not at every piece.
+    const dirty = new Map<Layer, Rect>();
+    let frame = 0;
+    const flush = (): void => {
+      frame = 0;
+      for (const [layer, r] of dirty) {
+        d.refreshLayer(layer, r);
+        d.render(r);
+      }
+      dirty.clear();
+    };
+    const mark = (layer: Layer, r: Rect): void => {
+      const old = dirty.get(layer);
+      if (!old) dirty.set(layer, r);
+      else {
+        const x0 = Math.min(old.x, r.x);
+        const y0 = Math.min(old.y, r.y);
+        dirty.set(layer, { x: x0, y: y0, w: Math.max(old.x + old.w, r.x + r.w) - x0, h: Math.max(old.y + old.h, r.y + r.h) - y0 });
+      }
+      if (!frame) frame = requestAnimationFrame(flush);
+    };
+    setNote(session, refine ? 'Afinando…' : 'Calculando…');
+    let covered: Rect | null = null;
+    let whole = true;
+    let complete = true;
+    let smaller = false;
+    try {
+      for (const layer of session.layers) {
+        const surface = paintTarget(layer).surface;
+        const rect = targetOf(scope, layer);
+        covered = rect;
+        if (rect) whole = false;
+        const sel = d.selection();
+        const prior = refine ? session.recs.get(layer) : undefined;
+        const o = { runner: poolRunner, tick, stop, ...(near ? { near } : {}), onPiece: (r: Rect) => mark(layer, r), ...(prior ? { recorder: prior.rec } : {}) };
+        let result;
+        if (def.kind === 'pixel') {
+          // A pixel filter is limited to the part shown by narrowing the selection to it.
+          let eff: Selection | null = sel;
+          if (rect) {
+            eff = Selection.rect(surface.width, surface.height, rect);
+            if (sel) eff.combine(sel, 'intersect');
+          }
+          result = await applyPixelFilterAsync(surface, layer.id, eff, def as PixelFilter, session.values, d.colors(), o);
+        } else {
+          // A big area is previewed smaller (and finished at full size once it is done): far less to work out while a slider moves.
+          const scale = refine || scope === 'all' ? 1 : previewScale(def as AreaFilter, session.values, rect ? rect.w * rect.h : surface.width * surface.height);
+          if (scale > 1) smaller = true;
+          result = await applyAreaFilterAsync(surface, layer.id, sel, def as AreaFilter, session.values, d.colors(), {
+            ...o,
+            scale,
+            ...(rect ? { limit: rect } : {}),
+            ...(prior?.frame ? { frame: prior.frame } : {}),
+          });
+          session.recs.set(layer, { rec: result.recorder, ...(result.frame ? { frame: result.frame } : {}) });
+        }
+        if (result.patch) {
+          const rect2 = earlier.reduce((a, b) => unionRect(a, b), result.patch.rect);
+          session.shown.push(patchCommand(d.doc(), { ...result.patch, rect: rect2 }, def.title));
+        }
+        if (!result.complete) {
+          complete = false;
+          break;
+        }
+      }
+    } finally {
+      if (frame) cancelAnimationFrame(frame);
+      flush();
+    }
+    if (session.dead) return false;
+    if (!complete || stop()) return false; // a newer preview takes over; it says what is being done
+    session.covered = covered;
+    session.cost = performance.now() - began;
+    if (smaller) return true; // the full-size pass says when it is done
+    setNote(session, null);
+    session.settled = whole;
+    return false;
+  }
+
+  /** Show the filter with the current values on what is on screen (or, `all`, on the whole layers: what "Aplicar" does). */
+  function preview(scope: PreviewScope = 'view', cpuOnly = false): Promise<void> {
+    const session = s;
+    if (!session) return Promise.resolve();
+    const tables = cpuOnly ? null : tablesFor(session);
+    if (tables) {
+      session.gpu = true;
+      setNote(session, null);
+      d.setPreview(tables);
+      return Promise.resolve();
+    }
+    const ticket = ++session.ticket;
+    const run = chain.then(async () => {
+      const again = await work(session, ticket, scope);
+      // The preview was made smaller: the same area is now done at full size, unless a newer preview has been asked for meanwhile.
+      if (again && !session.dead && ticket === session.ticket) await work(session, ++session.ticket, scope, true);
+    });
+    chain = run.catch(() => undefined);
+    return run;
   }
 
   /** Ask for a preview with the latest values: any number of asks before it runs make just one. */
@@ -247,17 +330,7 @@ export function createFiltersUi(d: FiltersDeps): {
     const run = (): void => {
       if (!s) return;
       s.cancelWait = null;
-      s.cancelSettle?.();
-      s.cancelSettle = null;
-      if (s.viewCost > SLOW_MS) {
-        preview('window');
-        const timer = window.setTimeout(() => {
-          if (!s) return;
-          s.cancelSettle = null;
-          preview('view');
-        }, SETTLE_MS);
-        s.cancelSettle = () => clearTimeout(timer);
-      } else preview('view');
+      void preview('view');
     };
     if (s.cost < 40) {
       const frame = requestAnimationFrame(run); // light filters follow the slider frame by frame
@@ -271,8 +344,6 @@ export function createFiltersUi(d: FiltersDeps): {
   function unschedule(): void {
     s?.cancelWait?.();
     if (s) s.cancelWait = null;
-    s?.cancelSettle?.();
-    if (s) s.cancelSettle = null;
     s?.cancelView?.();
     if (s) s.cancelView = null;
   }
@@ -295,7 +366,6 @@ export function createFiltersUi(d: FiltersDeps): {
     const note = document.createElement('small');
     note.className = 'note';
     note.hidden = true;
-    note.textContent = 'Mientras mueves el control solo se ve la zona central; al soltarlo se completa.';
     panel.append(title, note);
     for (const param of def.params) {
       const label = document.createElement('label');
@@ -312,7 +382,7 @@ export function createFiltersUi(d: FiltersDeps): {
       range.step = String(param.step);
       range.value = String(param.value);
       range.addEventListener('input', () => {
-        if (!s) return;
+        if (!s || s.applying) return;
         s.values[param.id] = Number(range.value);
         readout.textContent = show(Number(range.value));
         schedule();
@@ -355,40 +425,47 @@ export function createFiltersUi(d: FiltersDeps): {
       }
       const panel = buildPanel(id);
       d.host.append(panel);
-      s = { id, layers, values: defaultValues(def), shown: [], gpu: false, panel, cancelWait: null, cost: 0, viewCost: 0, cancelSettle: null, covered: null, cancelView: null };
+      s = { id, layers, values: defaultValues(def), shown: [], gpu: false, panel, cancelWait: null, cost: 0, covered: null, cancelView: null, ticket: 0, dead: false, applying: false, recs: new Map(), settled: false };
       if (skipped) d.say(skipped === 1 ? 'Una capa elegida no se puede filtrar y se queda como está.' : `${skipped} capas elegidas no se pueden filtrar y se quedan como están.`);
-      preview();
+      void preview();
       d.refreshUi();
       return true;
     },
     apply(): void {
-      if (!s) return;
+      const session = s;
+      if (!session || session.applying) return;
+      session.applying = true;
       unschedule();
-      preview('all', true); // the previews only covered what was on screen (or were only drawn): filter the whole area
-      const cmd = combineCommands(FILTERS[s.id]!.title, s.shown);
-      if (cmd) d.history().push(cmd);
-      else d.say('El filtro no ha cambiado nada.');
-      close();
+      session.ticket++; // the preview in flight stops
+      for (const b of session.panel.querySelectorAll('button')) b.disabled = true;
+      const busy = d.busy?.('Aplicando el filtro…');
+      void (async () => {
+        try {
+          // The previews only covered what was on screen (or were only drawn): filter the whole area, unless it already is.
+          if (!session.settled || session.gpu) await preview('all', true);
+        } finally {
+          busy?.done();
+        }
+        if (s !== session || session.dead) return;
+        const cmd = combineCommands(FILTERS[session.id]!.title, session.shown);
+        if (cmd) d.history().push(cmd);
+        else d.say('El filtro no ha cambiado nada.');
+        close();
+      })();
     },
     cancel(): void {
-      if (!s) return;
-      const { layers, shown } = s;
-      const regions = shown.map((c) => c.region);
-      unschedule();
-      undoShown();
+      const session = s;
+      if (!session || session.applying) return;
+      session.dead = true;
+      session.ticket++;
       close();
-      // A step is not tied to a layer here, so every filtered layer is redrawn where any step changed.
-      for (const region of regions) {
-        if (!region) continue;
-        for (const layer of layers) d.refreshLayer(layer, region);
-        d.render(region);
-      }
+      // What is still being worked on stops at its next piece; once it has, everything shown is taken back.
+      chain = chain.then(() => revert(session)).catch(() => undefined);
     },
     viewChanged(): void {
-      if (!s || s.gpu) return; // the renderer shows it on the whole page, wherever the view is
+      if (!s || s.gpu || s.applying) return; // the renderer shows it on the whole page, wherever the view is
       const session = s;
       if (!session.covered) return; // everything is filtered: nothing to catch up with
-      if (session.cancelSettle) return; // a window preview is about to be completed for the view as it is
       const view = d.viewRect();
       const c = session.covered;
       if (view && view.x >= c.x && view.y >= c.y && view.x + view.w <= c.x + c.w && view.y + view.h <= c.y + c.h) {
@@ -401,7 +478,7 @@ export function createFiltersUi(d: FiltersDeps): {
       const timer = window.setTimeout(() => {
         if (s !== session) return;
         session.cancelView = null;
-        if (!session.cancelWait) preview('view');
+        if (!session.cancelWait) void preview('view');
       }, VIEW_REST_MS);
       session.cancelView = () => clearTimeout(timer);
     },

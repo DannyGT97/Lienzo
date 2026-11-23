@@ -94,7 +94,7 @@ describe('readers of damaged files', () => {
     const doc = createDocument(40, 30);
     fillLayer(doc.layers[0]!, [255, 255, 255, 255]);
     setPixel(addLayer(doc, 'X'), 3, 3, [9, 9, 9, 255]);
-    const seed = new Uint8Array(exportPsd(doc).value as ArrayBuffer);
+    const seed = new Uint8Array((await exportPsd(doc)).value as ArrayBuffer);
     await expectOnlyCleanErrors('psd import', seed, (b) => importPsd(b.slice().buffer));
     await expectOnlyCleanErrors('psd preview', seed, (b) => readPsdPreview(b.slice().buffer), 200);
   }, 60000);

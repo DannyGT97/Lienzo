@@ -23,7 +23,7 @@ export interface FilterContext {
   sub: RGB;
 }
 
-type Values = Record<string, number>;
+export type Values = Record<string, number>;
 
 /** One pixel at a time: `make` gets the values and returns the function that changes [r, g, b, a] (0..255, straight alpha) in place. */
 export interface PixelFilter {
@@ -41,13 +41,35 @@ export interface AreaFilter {
   title: string;
   params: FilterParam[];
   margin(v: Values): number;
-  run(buf: Float32Array, w: number, h: number, v: Values, ctx: FilterContext): void;
+  /** The parameters that are lengths in pixels: they shrink with the picture when a preview is made at a lower resolution (see `previewScale`). */
+  lengths: readonly string[];
+  /** The result lives in the fine detail (sharpening) or on an exact grid (cells): a preview of it is always made at full size. */
+  fullSizePreview?: boolean;
+  /** Blocks of the page start at multiples of this many pixels from the corner of the area filtered (default 1): for filters with a grid (cells). */
+  cell?(v: Values): number;
+  /**
+   * The part of the page a block of the area needs to be read from to be filtered right (default: the block and `margin` all round).
+   * `frame` is the whole area being filtered; what lies outside it counts as transparent.
+   */
+  reach?(v: Values, block: Rect, frame: Rect): Rect;
+  /**
+   * `at`: where the block `buf` sits in the area being filtered (`x`, `y` from its corner; `fw`, `fh` its size), for filters whose result depends
+   * on the place (a centre, a grid, a wave). Left out, the block is the whole area.
+   */
+  run(buf: Float32Array, w: number, h: number, v: Values, ctx: FilterContext, at?: BlockAt): void;
+}
+
+export interface BlockAt {
+  x: number;
+  y: number;
+  fw: number;
+  fh: number;
 }
 
 export type Filter = PixelFilter | AreaFilter;
 
 const p = (id: string, label: string, min: number, max: number, value: number, step = 1, unit?: string): FilterParam => ({ id, label, min, max, step, value, ...(unit ? { unit } : {}) });
-const clamp255 = (v: number): number => (v < 0 ? 0 : v > 255 ? 255 : v);
+export const clamp255 = (v: number): number => (v < 0 ? 0 : v > 255 ? 255 : v);
 const luma = (r: number, g: number, b: number): number => 0.299 * r + 0.587 * g + 0.114 * b;
 
 // ---- colour spaces ---------------------------------------------------------------------------------
@@ -286,6 +308,7 @@ export function gaussianBlur(buf: Float32Array, w: number, h: number, sigma: num
 const gaussian: AreaFilter = {
   kind: 'area',
   id: 'gaussian',
+  lengths: ['radius'],
   title: 'Desenfoque gaussiano',
   params: [p('radius', 'Radio', 1, 100, 6, 1, 'px')],
   margin: (v) => Math.ceil(v.radius! * 3),
@@ -295,6 +318,7 @@ const gaussian: AreaFilter = {
 const motionBlur: AreaFilter = {
   kind: 'area',
   id: 'motion',
+  lengths: ['distance'],
   title: 'Desenfoque de movimiento',
   params: [p('angle', 'Ángulo', 0, 179, 0, 1, '°'), p('distance', 'Distancia', 1, 150, 20, 1, 'px')],
   margin: (v) => Math.ceil(v.distance! / 2) + 1,
@@ -358,6 +382,8 @@ const motionBlur: AreaFilter = {
 const sharpen: AreaFilter = {
   kind: 'area',
   id: 'sharpen',
+  fullSizePreview: true,
+  lengths: ['radius'],
   title: 'Enfocar (máscara de enfoque)',
   params: [p('amount', 'Cantidad', 1, 300, 100, 1, '%'), p('radius', 'Radio', 1, 30, 2, 1, 'px')],
   margin: (v) => Math.ceil(v.radius! * 3),
@@ -376,9 +402,12 @@ const sharpen: AreaFilter = {
 const pixelate: AreaFilter = {
   kind: 'area',
   id: 'pixelate',
+  fullSizePreview: true,
+  lengths: ['size'],
   title: 'Pixelar',
   params: [p('size', 'Tamaño del bloque', 2, 100, 8, 1, 'px')],
   margin: () => 0,
+  cell: (v) => Math.max(1, Math.round(v.size!)),
   run: (buf, w, h, v) => {
     const s = Math.max(1, Math.round(v.size!));
     for (let by = 0; by < h; by += s) {
@@ -510,20 +539,76 @@ function sampleBilinear(buf: Float32Array, w: number, h: number, x: number, y: n
   }
 }
 
+/** The centre (in the area filtered), the kind of blur and how many samples a pixel takes: all from the size of the whole area. */
+function radialSetup(v: Values, fw: number, fh: number): { cx: number; cy: number; zoom: boolean; span: number; n: number } {
+  const cx = (v.cx! / 100) * fw;
+  const cy = (v.cy! / 100) * fh;
+  const zoom = v.mode! >= 0.5;
+  const span = zoom ? v.amount! / 100 : (v.amount! * Math.PI) / 180; // zoom: fraction of the radius; spin: arc in radians
+  const reach = Math.hypot(Math.max(cx, fw - cx), Math.max(cy, fh - cy));
+  const n = Math.max(3, Math.min(48, Math.ceil(zoom ? span * reach : span * reach * 0.5)));
+  return { cx, cy, zoom, span, n };
+}
+
 const radialBlur: AreaFilter = {
   kind: 'area',
   id: 'radialblur',
+  lengths: [],
   title: 'Desenfoque radial',
   params: [p('mode', 'Tipo (0 giro, 1 zoom)', 0, 1, 0), p('amount', 'Cantidad', 1, 100, 20), p('cx', 'Centro X', 0, 100, 50, 1, '%'), p('cy', 'Centro Y', 0, 100, 50, 1, '%')],
   margin: () => 0,
-  run: (buf, w, h, v) => {
+  reach: (v, block, frame) => {
+    // A pixel takes its samples from all round the centre, far from itself: the block needs everything those samples can land on.
+    const { cx, cy, zoom, span, n } = radialSetup(v, frame.w, frame.h);
+    const cX = frame.x + cx;
+    const cY = frame.y + cy;
+    let x0 = Infinity;
+    let y0 = Infinity;
+    let x1 = -Infinity;
+    let y1 = -Infinity;
+    const corners: [number, number][] = [[block.x, block.y], [block.x + block.w, block.y], [block.x, block.y + block.h], [block.x + block.w, block.y + block.h]];
+    for (let k = 0; k < n; k++) {
+      const t = n === 1 ? 0 : k / (n - 1) - 0.5;
+      const sc = 1 + t * span;
+      const co = Math.cos(t * span);
+      const si = Math.sin(t * span);
+      for (const [px, py] of corners) {
+        const dx = px - cX;
+        const dy = py - cY;
+        const sx = zoom ? cX + dx * sc : cX + dx * co - dy * si;
+        const sy = zoom ? cY + dy * sc : cY + dx * si + dy * co;
+        x0 = Math.min(x0, sx);
+        y0 = Math.min(y0, sy);
+        x1 = Math.max(x1, sx);
+        y1 = Math.max(y1, sy);
+      }
+    }
+    // Spinning moves a point along an arc, which can bulge out past the corners: the whole disc of the farthest corner would be the safe bound,
+    // but a few more samples round the arcs of the four corners say the same thing at a fraction of the area.
+    if (!zoom) {
+      for (const [px, py] of corners) {
+        const dx = px - cX;
+        const dy = py - cY;
+        const r = Math.hypot(dx, dy);
+        const a0 = Math.atan2(dy, dx);
+        for (let k = 0; k <= 64; k++) {
+          const a = a0 + (k / 64 - 0.5) * span;
+          x0 = Math.min(x0, cX + r * Math.cos(a));
+          x1 = Math.max(x1, cX + r * Math.cos(a));
+          y0 = Math.min(y0, cY + r * Math.sin(a));
+          y1 = Math.max(y1, cY + r * Math.sin(a));
+        }
+      }
+    }
+    return { x: Math.floor(x0) - 1, y: Math.floor(y0) - 1, w: Math.ceil(x1) - Math.floor(x0) + 3, h: Math.ceil(y1) - Math.floor(y0) + 3 };
+  },
+  run: (buf, w, h, v, _ctx, at) => {
     const out = new Float32Array(buf.length);
-    const cx = (v.cx! / 100) * w;
-    const cy = (v.cy! / 100) * h;
-    const zoom = v.mode! >= 0.5;
-    const span = zoom ? v.amount! / 100 : (v.amount! * Math.PI) / 180; // zoom: fraction of the radius; spin: arc in radians
-    const reach = Math.hypot(Math.max(cx, w - cx), Math.max(cy, h - cy));
-    const n = Math.max(3, Math.min(48, Math.ceil(zoom ? span * reach : span * reach * 0.5)));
+    const ax = at?.x ?? 0;
+    const ay = at?.y ?? 0;
+    const { cx: fcx, cy: fcy, zoom, span, n } = radialSetup(v, at?.fw ?? w, at?.fh ?? h);
+    const cx = fcx - ax; // the centre, in this block
+    const cy = fcy - ay;
     // What depends only on the sample (not on the pixel) is worked out once: the scale of a zoom step, the cosine and sine of a turn.
     const zs = new Float64Array(n);
     const co = new Float64Array(n);
@@ -653,6 +738,7 @@ export function discBlur(buf: Float32Array, w: number, h: number, radius: number
 const lensBlur: AreaFilter = {
   kind: 'area',
   id: 'lensblur',
+  lengths: ['radius'],
   title: 'Desenfoque de lente',
   params: [p('radius', 'Radio', 1, 60, 8, 1, 'px')],
   margin: (v) => Math.ceil(v.radius!) + 1,
@@ -669,19 +755,30 @@ function hash2(x: number, y: number, salt: number): number {
 const crystallize: AreaFilter = {
   kind: 'area',
   id: 'crystallize',
+  fullSizePreview: true,
+  lengths: ['size'],
   title: 'Cristalizar',
   params: [p('size', 'Tamaño de celda', 3, 200, 24, 1, 'px')],
   margin: () => 0,
-  run: (buf, w, h, v) => {
+  cell: (v) => Math.max(2, Math.round(v.size!)),
+  // A crystal reaches about two cells from its seed: the block is read three cells further all round, so every crystal a pixel of it belongs to is whole.
+  reach: (v, block) => {
     const s = Math.max(2, Math.round(v.size!));
+    return { x: block.x - 3 * s, y: block.y - 3 * s, w: block.w + 6 * s, h: block.h + 6 * s };
+  },
+  run: (buf, w, h, v, _ctx, at) => {
+    const s = Math.max(2, Math.round(v.size!));
+    // The grid of seeds is that of the whole area (the block starts at a whole number of cells from its corner).
+    const gx0 = Math.round((at?.x ?? 0) / s);
+    const gy0 = Math.round((at?.y ?? 0) / s);
     const gw = Math.ceil(w / s) + 2;
     const gh = Math.ceil(h / s) + 2;
     const sx = new Float32Array(gw * gh);
     const sy = new Float32Array(gw * gh);
     for (let gy = 0; gy < gh; gy++) {
       for (let gx = 0; gx < gw; gx++) {
-        sx[gy * gw + gx] = (gx - 1 + 0.15 + 0.7 * hash2(gx, gy, 1)) * s;
-        sy[gy * gw + gx] = (gy - 1 + 0.15 + 0.7 * hash2(gx, gy, 2)) * s;
+        sx[gy * gw + gx] = (gx - 1 + 0.15 + 0.7 * hash2(gx + gx0, gy + gy0, 1)) * s;
+        sy[gy * gw + gx] = (gy - 1 + 0.15 + 0.7 * hash2(gx + gx0, gy + gy0, 2)) * s;
       }
     }
     const owner = new Int32Array(w * h);
@@ -723,6 +820,7 @@ const crystallize: AreaFilter = {
 const glow: AreaFilter = {
   kind: 'area',
   id: 'glow',
+  lengths: ['radius'],
   title: 'Resplandor',
   params: [p('radius', 'Radio', 1, 100, 12, 1, 'px'), p('strength', 'Intensidad', 0, 300, 100, 1, '%'), p('threshold', 'Solo por encima de brillo', 0, 254, 0)],
   margin: (v) => Math.ceil(v.radius! * 3),
@@ -753,6 +851,7 @@ const glow: AreaFilter = {
 const dropShadow: AreaFilter = {
   kind: 'area',
   id: 'dropshadow',
+  lengths: ['dx', 'dy', 'blur'],
   title: 'Sombra paralela (color principal)',
   params: [p('dx', 'Desplazamiento X', -100, 100, 6, 1, 'px'), p('dy', 'Desplazamiento Y', -100, 100, 6, 1, 'px'), p('blur', 'Desenfoque', 0, 60, 4, 1, 'px'), p('opacity', 'Opacidad', 0, 100, 70, 1, '%')],
   margin: (v) => Math.ceil(Math.max(Math.abs(v.dx!), Math.abs(v.dy!)) + v.blur! * 3),
@@ -783,16 +882,19 @@ const dropShadow: AreaFilter = {
 const wave: AreaFilter = {
   kind: 'area',
   id: 'wave',
+  lengths: ['ampx', 'lenx', 'ampy', 'leny'],
   title: 'Ondas',
   params: [p('ampx', 'Amplitud horizontal', 0, 100, 8, 1, 'px'), p('lenx', 'Longitud de onda horizontal', 4, 500, 60, 1, 'px'), p('ampy', 'Amplitud vertical', 0, 100, 0, 1, 'px'), p('leny', 'Longitud de onda vertical', 4, 500, 60, 1, 'px')],
   margin: (v) => Math.ceil(Math.max(v.ampx!, v.ampy!)),
-  run: (buf, w, h, v) => {
+  run: (buf, w, h, v, _ctx, at) => {
     const out = new Float32Array(buf.length);
     const px = [0, 0, 0, 0];
+    const ax = at?.x ?? 0;
+    const ay = at?.y ?? 0;
     for (let y = 0; y < h; y++) {
-      const shiftX = v.ampx! * Math.sin((2 * Math.PI * y) / v.lenx!); // rows slide sideways
+      const shiftX = v.ampx! * Math.sin((2 * Math.PI * (y + ay)) / v.lenx!); // rows slide sideways
       for (let x = 0; x < w; x++) {
-        const shiftY = v.ampy! * Math.sin((2 * Math.PI * x) / v.leny!); // columns slide up and down
+        const shiftY = v.ampy! * Math.sin((2 * Math.PI * (x + ax)) / v.leny!); // columns slide up and down
         sampleBilinear(buf, w, h, x - shiftX, y - shiftY, px);
         const o = (y * w + x) * 4;
         out[o] = px[0]!;
@@ -841,7 +943,7 @@ export type AreaResult = { patch: StrokePatch | null; rect: Rect } | { tooLarge:
  * The selection's coverage (0..255) over `region`, one byte per pixel, or null when it covers all of it fully (tile by tile, so
  * a rectangle holding the region costs nothing).
  */
-function coverageOver(sel: Selection, region: Rect): Uint8Array | null {
+export function coverageOver(sel: Selection, region: Rect): Uint8Array | null {
   let full = true;
   const tx0 = Math.floor(region.x / TILE);
   const ty0 = Math.floor(region.y / TILE);
@@ -945,4 +1047,26 @@ export function applyAreaFilter(surface: TiledSurface, layerId: number, sel: Sel
   }
   surface.writeRect(region, out);
   return { patch: rec.patch(region), rect: region };
+}
+
+/**
+ * How much smaller a preview of this filter may be made: 1 (full size), 2 or 4. Every length the filter has must stay a few pixels long
+ * (a radius of 8 shrunk by 4 would be 2: the picture would show something else), and a filter is previewed smaller only when the
+ * area is big enough for that to matter (`pixels`).
+ */
+export function previewScale(f: AreaFilter, v: Values, pixels: number): 1 | 2 | 4 {
+  if (f.fullSizePreview) return 1;
+  const smallest = Math.min(...f.lengths.map((id) => Math.abs(v[id] ?? 0)).filter((x) => x > 0), Infinity);
+  for (const k of [4, 2] as const) {
+    if (pixels >= 600_000 * k && smallest >= 3 * k) return k;
+  }
+  return 1;
+}
+
+/** The values of a filter for a picture `k` times smaller: its lengths shrink by `k`. */
+export function scaledValues(f: AreaFilter, v: Values, k: number): Values {
+  if (k === 1) return v;
+  const out = { ...v };
+  for (const id of f.lengths) if (id in out) out[id] = out[id]! / k;
+  return out;
 }

@@ -7,18 +7,18 @@ import { fillLayer } from './test-utils';
 
 // The pictures that formats keep of their page, read without touching a single layer.
 describe('quick previews', () => {
-  it('a PSD gives its merged picture, and nothing when the page is blank', () => {
+  it('a PSD gives its merged picture, and nothing when the page is blank', async () => {
     const doc = createDocument(40, 30, 300);
     const l = addLayer(doc, 'Dibujo');
     fillLayer(l, [200, 30, 20, 255]);
-    const merged = readPsdPreview(exportPsd(doc).value);
+    const merged = readPsdPreview((await exportPsd(doc)).value);
     expect(merged).not.toBeNull();
     expect([merged!.width, merged!.height]).toEqual([40, 30]);
     expect(Array.from(merged!.data.subarray(0, 4))).toEqual([200, 30, 20, 255]);
 
     const blank = createDocument(8, 8, 300);
     blank.layers.forEach((x) => (x.visible = false));
-    expect(readPsdPreview(exportPsd(blank).value)).toBeNull();
+    expect(readPsdPreview((await exportPsd(blank)).value)).toBeNull();
     expect(readPsdPreview(new Uint8Array(20).buffer)).toBeNull(); // not a PSD at all
   });
 

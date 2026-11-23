@@ -1,5 +1,6 @@
-Arreglos de la tableta: las opciones de Preferencias se ven bien y los avisos de falta de memoria ya no se repiten.
+Guardar y aplicar filtros ya no congelan la ventana, con ningún formato ni ningún filtro.
 
-- Preferencias en pantalla táctil: los interruptores se estiraban en la tableta; ahora tienen su forma y son un poco más grandes para pulsarlos.
-- Falta de memoria: cuando la tableta se queda sin memoria, Lienzo lo cuenta con palabras («se ha acabado la memoria disponible», con qué hacer) en vez del mensaje técnico, y no apila el mismo aviso una y otra vez.
-- Mediciones en tableta: el guardado de un documento de 36 capas no deja la ventana parada más de ~300 ms, y el bote de pintura con 38 capas tarda ~220 ms.
+- Guardar sin congelar: guardar un PSD (y también PSB, OpenRaster, PNG, JPG, WebP, BMP, TIFF, TGA y .clip) dejaba la ventana parada varios segundos en la tableta. Ahora cada formato trabaja por trozos y cede el turno a la pantalla; el PSD se escribe en un hilo aparte. Con un documento real de 11 capas (4983 × 5074) la ventana no se queda parada más de ~250 ms en ningún formato (antes, hasta 3 s en PSD y 0,5 s en PNG). El PNG plano sale además más pequeño.
+- Filtros más ágiles: los 21 filtros se calculan por bloques, repartidos entre los núcleos del dispositivo, y se pueden interrumpir. Mover un control ya no congela la ventana (antes hasta 53 s en los desenfoques) y Aplicar tampoco (antes hasta 55 s). La vista previa se va rellenando desde el centro de la pantalla y, en páginas grandes, se calcula primero a menor tamaño y se afina después. Al aplicar sale un aviso «Aplicando el filtro…».
+- La vista previa de Radial, Cristalizar, Pixelar y Ondas coincide ahora con lo que se aplica (antes se centraban en la parte visible).
+- Aún lento en la tableta: los desenfoques de lente y radial sobre una capa entera de varios megapíxeles siguen tardando bastante en completarse, aunque la ventana responde mientras tanto.

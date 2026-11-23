@@ -1,3 +1,5 @@
+import type { Tick } from './cooperate';
+
 /**
  * A small ZIP reader and writer, enough for OpenRaster: whole files only, no encryption, no ZIP64, no multi-disk.
  * Entries are written "stored" (PNG data is already compressed); the reader also understands "deflate" entries,
@@ -20,6 +22,20 @@ export function crc32(data: Uint8Array): number {
   return (c ^ 0xffffffff) >>> 0;
 }
 
+/** Bytes checked between two turns given to the window (a tablet runs about 100 MB a second). */
+const CRC_STEP = 1 << 20;
+
+/** `crc32` that gives the window a turn every megabyte instead of holding it for the whole of a big file. */
+export async function crc32Async(data: Uint8Array, tick: Tick): Promise<number> {
+  let c = 0xffffffff;
+  for (let from = 0; from < data.length; from += CRC_STEP) {
+    const to = Math.min(data.length, from + CRC_STEP);
+    for (let i = from; i < to; i++) c = CRC_TABLE[(c ^ data[i]!) & 0xff]! ^ (c >>> 8);
+    await tick();
+  }
+  return (c ^ 0xffffffff) >>> 0;
+}
+
 export interface ZipEntry {
   name: string;
   data: Uint8Array;
@@ -33,13 +49,44 @@ const utf8 = new TextEncoder();
 
 /** Pack entries into a ZIP. The first entry is written first, which OpenRaster needs for its `mimetype`. */
 export function writeZip(entries: readonly ZipEntry[]): Uint8Array {
+  const pieces = layout(entries, entries.map((e) => crc32(e.data)));
+  const out = new Uint8Array(pieces.reduce((n, p) => n + p.length, 0));
+  let at = 0;
+  for (const p of pieces) {
+    out.set(p, at);
+    at += p.length;
+  }
+  return out;
+}
+
+/** `writeZip` that gives the window turns while it checks the files (see cooperate.ts). */
+export async function writeZipAsync(entries: readonly ZipEntry[], tick: Tick): Promise<Uint8Array> {
+  const crcs: number[] = [];
+  for (const e of entries) crcs.push(await crc32Async(e.data, tick));
+  const pieces = layout(entries, crcs);
+  const out = new Uint8Array(pieces.reduce((n, p) => n + p.length, 0));
+  let at = 0;
+  for (const p of pieces) {
+    // A big file is copied in steps: one `set` of 100 MB holds the window for a moment on a tablet.
+    for (let from = 0; from < p.length; from += CRC_STEP * 4) {
+      const part = p.subarray(from, Math.min(p.length, from + CRC_STEP * 4));
+      out.set(part, at + from);
+      await tick();
+    }
+    at += p.length;
+  }
+  return out;
+}
+
+/** The pieces of the ZIP in order (local headers and data, then the central directory and its end). */
+function layout(entries: readonly ZipEntry[], crcs: readonly number[]): Uint8Array[] {
   if (entries.length > MAX_ENTRIES) throw new Error('Demasiados archivos para un ZIP.');
   const parts: Uint8Array[] = [];
   const central: Uint8Array[] = [];
   let offset = 0;
-  for (const e of entries) {
+  for (const [index, e] of entries.entries()) {
     const name = utf8.encode(e.name);
-    const crc = crc32(e.data);
+    const crc = crcs[index]!;
     if (e.data.length >= 0xffffffff || offset >= 0xffffffff) throw new Error('El archivo ZIP sería demasiado grande (más de 4 GB).');
     const local = new Uint8Array(30 + name.length);
     const lv = new DataView(local.buffer);
@@ -76,13 +123,7 @@ export function writeZip(entries: readonly ZipEntry[]): Uint8Array {
   ev.setUint16(10, entries.length, true);
   ev.setUint32(12, centralSize, true);
   ev.setUint32(16, offset, true);
-  const out = new Uint8Array(offset + centralSize + 22);
-  let at = 0;
-  for (const p of [...parts, ...central, end]) {
-    out.set(p, at);
-    at += p.length;
-  }
-  return out;
+  return [...parts, ...central, end];
 }
 
 async function inflateRaw(data: Uint8Array, expected: number): Promise<Uint8Array> {

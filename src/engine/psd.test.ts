@@ -27,9 +27,9 @@ function sampleDoc() {
 }
 
 describe('PSD round trip', () => {
-  it('preserves pixels, names, order, opacity, mode and flags', () => {
+  it('preserves pixels, names, order, opacity, mode and flags', async () => {
     const doc = sampleDoc();
-    const { value, warnings } = exportPsd(doc);
+    const { value, warnings } = await exportPsd(doc);
     expect(warnings).toEqual([]);
     const back = importPsd(value).value;
 
@@ -61,10 +61,10 @@ describe('PSD round trip', () => {
     expect(Array.from(flatten(back))).toEqual(Array.from(flatten(doc)));
   });
 
-  it('writes a PSB (version 2) that reads back the same as the PSD', () => {
+  it('writes a PSB (version 2) that reads back the same as the PSD', async () => {
     const doc = sampleDoc();
-    const psd = new Uint8Array(exportPsd(doc).value);
-    const psb = new Uint8Array(exportPsd(doc, { large: true }).value);
+    const psd = new Uint8Array((await exportPsd(doc)).value);
+    const psb = new Uint8Array((await exportPsd(doc, { large: true })).value);
     expect(Array.from(psd.subarray(0, 6))).toEqual([0x38, 0x42, 0x50, 0x53, 0, 1]);
     expect(Array.from(psb.subarray(0, 6))).toEqual([0x38, 0x42, 0x50, 0x53, 0, 2]);
     const back = importPsd(psb.buffer.slice(psb.byteOffset, psb.byteOffset + psb.byteLength) as ArrayBuffer).value;
@@ -72,22 +72,22 @@ describe('PSD round trip', () => {
     expect(Array.from(flatten(back))).toEqual(Array.from(flatten(doc)));
   });
 
-  it('keeps empty layers', () => {
+  it('keeps empty layers', async () => {
     const doc = createDocument(4, 4);
     fillLayer(doc.layers[0]!, [255, 255, 255, 255]);
     addLayer(doc, 'Vacía');
-    const back = importPsd(exportPsd(doc).value).value;
+    const back = importPsd((await exportPsd(doc)).value).value;
     expect(back.layers.map((l) => l.name)).toEqual(['Layer 1', 'Vacía']);
     expect(back.layers[1]!.surface.isEmpty).toBe(true);
   });
 
-  it('exports a paper layer as an opaque layer and reads it back as paper, costing no pixels', () => {
+  it('exports a paper layer as an opaque layer and reads it back as paper, costing no pixels', async () => {
     const doc = createDocument(300, 300);
     doc.layers[0]!.kind = 'paper';
     doc.layers[0]!.paperColor = [10, 20, 30];
     const top = addLayer(doc, 'tinta');
     setPixel(top, 5, 5, [255, 0, 0, 255]);
-    const back = importPsd(exportPsd(doc).value).value;
+    const back = importPsd((await exportPsd(doc)).value).value;
     expect(back.layers[0]!.kind).toBe('paper');
     expect(back.layers[0]!.paperColor).toEqual([10, 20, 30]);
     expect(back.layers[0]!.surface.tileCount).toBe(0);
@@ -95,32 +95,32 @@ describe('PSD round trip', () => {
     expect(Array.from(flatten(back))).toEqual(Array.from(flatten(doc)));
   });
 
-  it('keeps a page-wide layer that is not one flat colour as pixels', () => {
+  it('keeps a page-wide layer that is not one flat colour as pixels', async () => {
     const doc = createDocument(300, 300);
     fillLayer(doc.layers[0]!, [255, 255, 255, 255]);
     setPixel(doc.layers[0]!, 150, 150, [0, 0, 0, 255]);
-    const back = importPsd(exportPsd(doc).value).value;
+    const back = importPsd((await exportPsd(doc)).value).value;
     expect(back.layers[0]!.kind).toBe('raster');
     expect(back.layers[0]!.surface.pixel(150, 150)).toEqual([0, 0, 0, 255]);
   });
 
-  it('writes only the content rectangle of each layer', () => {
+  it('writes only the content rectangle of each layer', async () => {
     const doc = createDocument(800, 800);
     const l = doc.layers[0]!;
     setPixel(l, 700, 650, [1, 2, 3, 255]);
     setPixel(l, 710, 660, [4, 5, 6, 255]);
-    const back = importPsd(exportPsd(doc).value).value;
+    const back = importPsd((await exportPsd(doc)).value).value;
     expect(back.layers[0]!.surface.contentBounds()).toEqual({ x: 700, y: 650, w: 11, h: 11 });
     expect(back.layers[0]!.surface.pixel(710, 660)).toEqual([4, 5, 6, 255]);
   });
 
-  it('round-trips every blend mode that has a PSD equivalent', () => {
+  it('round-trips every blend mode that has a PSD equivalent', async () => {
     const approx = new Set(['glowDodge', 'addGlow']);
     for (const mode of BLEND_MODES) {
       const doc = createDocument(2, 2);
       doc.layers[0]!.blend = mode;
       fillLayer(doc.layers[0]!, [200, 200, 200, 200]);
-      const { value, warnings } = exportPsd(doc);
+      const { value, warnings } = await exportPsd(doc);
       expect(warnings.length > 0).toBe(approx.has(mode));
       if (!approx.has(mode)) expect(importPsd(value).value.layers[0]!.blend).toBe(mode);
     }
@@ -128,7 +128,7 @@ describe('PSD round trip', () => {
 });
 
 describe('PSD import', () => {
-  it('places offset layers, keeps groups as folders and reports unsupported content', () => {
+  it('places offset layers, keeps groups as folders and reports unsupported content', async () => {
     const px = (w: number, h: number, rgba: number[]) => ({
       width: w,
       height: h,
@@ -158,7 +158,7 @@ describe('PSD import', () => {
     expect(warnings.some((w) => w.includes('dissolve'))).toBe(true);
   });
 
-  it('falls back to the composite image for a PSD without layers', () => {
+  it('falls back to the composite image for a PSD without layers', async () => {
     const data = new Uint8ClampedArray(Array.from({ length: 4 }, () => [77, 120, 200, 255]).flat());
     const buf = writePsd({ width: 2, height: 2, imageData: { width: 2, height: 2, data } });
     const { value: doc } = importPsd(buf);
@@ -166,7 +166,7 @@ describe('PSD import', () => {
     expect(doc.layers[0]!.surface.pixel(0, 0)).toEqual([77, 120, 200, 255]);
   });
 
-  it('keeps folders (pass through or not) and layer masks through export and import', () => {
+  it('keeps folders (pass through or not) and layer masks through export and import', async () => {
     const doc = createDocument(300, 100);
     fillLayer(doc.layers[0]!, [255, 255, 255, 255]);
     const a = addLayer(doc, 'a');
@@ -178,7 +178,7 @@ describe('PSD import', () => {
     f.opacity = 0.8;
     f.open = false;
     createMask(doc, a.id, 'selection', Selection.rect(300, 100, { x: 0, y: 0, w: 100, h: 100 }));
-    const { value, warnings } = exportPsd(doc);
+    const { value, warnings } = await exportPsd(doc);
     expect(warnings).toEqual([]);
     const back = importPsd(value).value;
     expect(back.layers.map((l) => l.name)).toEqual(['Layer 1', 'a', 'b', 'Carpeta']);
@@ -195,17 +195,17 @@ describe('PSD import', () => {
     expect(bufPixel(flatten(back), 300, 200, 50)).toEqual([255, 255, 255, 255]);
     const through = groupLayers(doc, [f.id], 'Otra')!;
     expect(through.through).toBe(true);
-    expect(importPsd(exportPsd(doc).value).value.layers.at(-1)!.through).toBe(true);
+    expect(importPsd((await exportPsd(doc)).value).value.layers.at(-1)!.through).toBe(true);
   });
 });
 
 describe('flat PSD export', () => {
-  it('holds one layer with the merged page, not the layers of the document', () => {
+  it('holds one layer with the merged page, not the layers of the document', async () => {
     const doc = sampleDoc();
-    const layered = importPsd(exportPsd(doc).value).value;
+    const layered = importPsd((await exportPsd(doc)).value).value;
     expect(layered.layers.length).toBe(3);
 
-    const { value, warnings } = exportFlatPsd(doc);
+    const { value, warnings } = await exportFlatPsd(doc);
     expect(warnings).toEqual([]);
     const back = importPsd(value).value;
     expect([back.width, back.height]).toEqual([6, 4]);
@@ -218,17 +218,17 @@ describe('flat PSD export', () => {
     expect(Array.from(flatten(back))).toEqual(Array.from(flatten(doc, { output: true })));
   });
 
-  it('leaves out hidden layers like any output, and keeps transparency where nothing is drawn', () => {
+  it('leaves out hidden layers like any output, and keeps transparency where nothing is drawn', async () => {
     const doc = createDocument(4, 2);
     doc.layers[0]!.visible = false; // the only layer is hidden: nothing to show
-    const back = importPsd(exportFlatPsd(doc).value).value;
+    const back = importPsd((await exportFlatPsd(doc)).value).value;
     expect(back.layers).toHaveLength(1);
     expect(Array.from(flatten(back)).every((v) => v === 0)).toBe(true);
   });
 
-  it('writes a PSB with one layer when asked for the large format', () => {
+  it('writes a PSB with one layer when asked for the large format', async () => {
     const doc = sampleDoc();
-    const bytes = new Uint8Array(exportFlatPsd(doc, { large: true }).value);
+    const bytes = new Uint8Array((await exportFlatPsd(doc, { large: true })).value);
     expect(bytes[4]).toBe(0);
     expect(bytes[5]).toBe(2); // version 2 = PSB
     const back = importPsd(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer).value;
@@ -237,10 +237,10 @@ describe('flat PSD export', () => {
 });
 
 describe('damaged PSD files', () => {
-  const sample = (): Uint8Array => new Uint8Array(exportPsd(sampleDoc()).value as ArrayBuffer);
+  const sample = async (): Promise<Uint8Array> => new Uint8Array((await exportPsd(sampleDoc())).value as ArrayBuffer);
 
-  it('refuses a header that asks for far more than the file can hold, before reserving memory for it', () => {
-    const b = sample();
+  it('refuses a header that asks for far more than the file can hold, before reserving memory for it', async () => {
+    const b = await sample();
     const dv = new DataView(b.buffer);
     dv.setUint32(14, 20000); // height
     dv.setUint32(18, 20000); // width: 400 megapixels from a few kilobytes
@@ -248,8 +248,8 @@ describe('damaged PSD files', () => {
     expect(readPsdPreview(b.buffer)).toBeNull();
   });
 
-  it('says what is wrong in Spanish whatever way the reader fails, and only throws Errors', () => {
-    const good = sample();
+  it('says what is wrong in Spanish whatever way the reader fails, and only throws Errors', async () => {
+    const good = await sample();
     let failures = 0;
     for (let cut = 0; cut < good.length; cut += 7) {
       const cutBuf = good.slice(0, cut);

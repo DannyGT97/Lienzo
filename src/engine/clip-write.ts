@@ -2,7 +2,8 @@ import type { SqlJsStatic } from 'sql.js';
 import { buildBlockSet, buildCsf, buildExta, deflateBlock, encodeBlock, headWithDatabaseOffset, parseAttribute, parseBlockSet, parseCsf, parseExta, withBlockSizes } from './clip-csf';
 import { clipOriginOf, encodeBlockPixels, importClip, shapeOf, structureOf, tileHash, type ClipLayerOrigin } from './clip-file';
 import { LayerRows, type TreeIds } from './clip-layers';
-import { flattenRegion, thumbnail } from './composite';
+import { flattenRegionAsync, thumbnail } from './composite';
+import { noTick, type Tick } from './cooperate';
 import type { Document, Layer } from './document';
 import { layerTree, type TreeNode } from './layer-tree';
 import { TILE } from './tiles';
@@ -24,6 +25,8 @@ import { TILE } from './tiles';
  * The result is read back (integrity check, re-import of the layer tree) before it is returned.
  */
 export interface ClipWriteCodecs {
+  /** Turns given to the window while a big file is made (see cooperate.ts). */
+  tick?: Tick;
   encodePng(width: number, height: number, rgba: Uint8ClampedArray): Promise<Uint8Array>;
   /** Load the SQLite engine (sql.js). */
   loadSql(): Promise<SqlJsStatic>;
@@ -53,6 +56,7 @@ export async function exportClip(doc: Document, codecs: ClipWriteCodecs): Promis
     throw new Error('El tamaño del lienzo cambió desde que se abrió el .clip; todavía no se puede guardar así. Guarda como .lienzo u .ora.');
   }
   const warnings: string[] = [];
+  const tick = codecs.tick ?? noTick;
   const entries: Entry[] = parseCsf(origin.bytes).map((c) => ({ tag: c.tag, payload: c.payload, ...(c.tag === 'CHNKExta' ? { id: parseExta(c.payload).id } : {}) }));
   const headEntry = entries.find((e) => e.tag === 'CHNKHead');
   const sqlEntry = entries.find((e) => e.tag === 'CHNKSQLi');
@@ -90,6 +94,7 @@ export async function exportClip(doc: Document, codecs: ClipWriteCodecs): Promis
       for (let i = 0; i < columns * rowsN; i++) {
         const tile = layer.surface.get(i % columns, Math.floor(i / columns));
         const now = tileHash(tile);
+        await tick(); // looking at every block of a layer (to see what changed) is most of this function for a layer that did not
         const old = previous?.[i];
         if (old && hashes && now === (hashes.get(i) ?? 'empty')) {
           out.push({ record: old.record, checksum: old.checksum, status: old.status });
@@ -249,7 +254,7 @@ export async function exportClip(doc: Document, codecs: ClipWriteCodecs): Promis
       const w = Number(row?.[0] ?? doc.width);
       const h = Number(row?.[1] ?? doc.height);
       if (row && w > 0 && h > 0 && w * h <= 40_000_000) {
-        const rgba = w === doc.width && h === doc.height ? flattenRegion(doc, { x: 0, y: 0, w, h }, { output: true }) : thumbnail(doc, w, h, { output: true });
+        const rgba = w === doc.width && h === doc.height ? await flattenRegionAsync(doc, { x: 0, y: 0, w, h }, { output: true }, tick) : thumbnail(doc, w, h, { output: true });
         db.run('UPDATE CanvasPreview SET ImageData = ?', [await codecs.encodePng(w, h, rgba)]);
       } else {
         warnings.push('No se actualizó la imagen de vista previa del archivo.');
@@ -264,6 +269,7 @@ export async function exportClip(doc: Document, codecs: ClipWriteCodecs): Promis
   }
 
   // The Head chunk points at the database chunk; then read the whole file back.
+  await tick();
   const probe = buildCsf(entries.map((e) => ({ tag: e.tag, payload: e.payload })));
   headEntry.payload = headWithDatabaseOffset(headPayload, probe.starts[entries.indexOf(sqlEntry)]!);
   const done = buildCsf(entries.map((e) => ({ tag: e.tag, payload: e.payload })));
@@ -272,7 +278,9 @@ export async function exportClip(doc: Document, codecs: ClipWriteCodecs): Promis
   for (const [i, e] of entries.entries()) {
     if (e.id && parseExta(back[i]!.payload).id !== e.id) throw new Error('El archivo .clip resultante no es coherente; no se guardó.');
   }
+  await tick();
   await verifyOffsets(done.bytes, done.starts, entries, codecs);
+  await tick();
   const reread = await importClip(done.bytes, undefined, { pixels: false });
   if (shapeOf(reread.value) !== shapeOf(doc)) throw new Error('Al releer el .clip resultante, las capas no coinciden con las del documento; no se guardó el archivo para no dañarlo.');
   return { value: done.bytes, warnings };

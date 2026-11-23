@@ -30,7 +30,9 @@ import { LiquifyStroke, type LiquifyMode } from '../engine/liquify';
 import { SmudgeStroke } from '../engine/smudge';
 import { CloneStroke } from '../engine/clone';
 import { MultiStroke } from '../engine/multi-stroke';
-import { flatten, flattenRegion, layerThumbnail, sampleDocument } from '../engine/composite';
+import { FILTERS } from '../engine/filters';
+import { flatten, flattenRegionAsync, layerThumbnail, sampleDocument } from '../engine/composite';
+import { createTick } from '../engine/cooperate';
 import { DECODE_PIXEL_LIMIT, SNIFF_BYTES, decodePcx, decodePnm, decodeQoi, decodeTga, decodeTiff, sniffImage, type RawImage } from '../engine/image-decode';
 import {
   activeLayer,
@@ -101,7 +103,7 @@ import { openUpdatesWindow } from './updates-window';
 import { checkForUpdates, currentVersion, findUpdate, updatesAvailable } from './updates';
 import { loadRecent, mergeRecent, relocateRecent, sameFile, storeRecent, withoutRecent, type RecentFile } from './recent-files';
 import { createHome } from './library-ui';
-import { encodePng } from '../engine/png-encode';
+import { encodePng, encodePngRows } from '../engine/png-encode';
 import { aboutLines, pageVersion, versionLabel, type BuildInfo } from './about';
 import { libraryFs } from './library-fs';
 import { createPreviewer, createThumbs, previewPng } from './library-preview';
@@ -1342,6 +1344,7 @@ const filtersUi = createFiltersUi({
   refreshLayer,
   refreshUi,
   say: (msg) => setStatus(msg),
+  busy: (text) => notify.busy(text),
   viewRect: () => {
     const box = stageBox();
     if (box.w < 1 || box.h < 1) return null;
@@ -2205,32 +2208,39 @@ type ImageFormat = 'png' | 'jpg' | 'webp' | 'bmp' | 'tga' | 'tif';
 const CANVAS_TYPES: Partial<Record<ImageFormat, string>> = { png: 'image/png', jpg: 'image/jpeg', webp: 'image/webp' };
 
 /** The page as one flat picture (drafts and reference layers left out), encoded in `format`. */
-async function renderFlat(format: ImageFormat): Promise<Blob> {
+async function renderFlat(format: ImageFormat, page: Document = doc): Promise<Blob> {
   const canvasFormat = format in CANVAS_TYPES;
   const limit = canvasFormat ? 120_000_000 : 60_000_000; // the other formats are built in one block of memory
-  if (doc.width * doc.height > limit) {
+  if (page.width * page.height > limit) {
     throw new Error(`El documento es demasiado grande para guardarlo como ${format.toUpperCase()} (más de ${limit / 1_000_000} megapíxeles).`);
   }
-  // Flatten in horizontal bands so no temporary buffer is bigger than a few megabytes.
+  // Flatten in horizontal bands so no temporary buffer is bigger than a few megabytes; the window gets a turn between pieces.
   const band = 256;
   if (!canvasFormat) {
-    const all = new Uint8ClampedArray(doc.width * doc.height * 4);
-    for (let y = 0; y < doc.height; y += band) {
-      const h = Math.min(band, doc.height - y);
-      all.set(flattenRegion(doc, { x: 0, y, w: doc.width, h }, { output: true }), y * doc.width * 4);
+    const all = new Uint8ClampedArray(page.width * page.height * 4);
+    for (let y = 0; y < page.height; y += band) {
+      const h = Math.min(band, page.height - y);
+      all.set(await flattenRegionAsync(page, { x: 0, y, w: page.width, h }, { output: true }, saveTick), y * page.width * 4);
     }
-    const bytes = format === 'bmp' ? encodeBmp(doc.width, doc.height, all) : format === 'tga' ? encodeTga(doc.width, doc.height, all) : encodeTiff(doc.width, doc.height, all, doc.dpi);
+    await saveTick();
+    const bytes = format === 'bmp' ? encodeBmp(page.width, page.height, all) : format === 'tga' ? encodeTga(page.width, page.height, all) : encodeTiff(page.width, page.height, all, page.dpi);
     return new Blob([bytes as BlobPart], { type: format === 'tif' ? 'image/tiff' : 'application/octet-stream' });
   }
+  if (format === 'png') {
+    // Not through the canvas: its `toBlob` holds the window for half a second on a big page, and the rows are made as they are written.
+    const bytes = await encodePngRows(page.width, page.height, (from, to) => flattenRegionAsync(page, { x: 0, y: from, w: page.width, h: to - from }, { output: true }, saveTick), saveTick, { sub: true });
+    return new Blob([bytes as BlobPart], { type: 'image/png' });
+  }
   const c = document.createElement('canvas');
-  c.width = doc.width;
-  c.height = doc.height;
+  c.width = page.width;
+  c.height = page.height;
   const cctx = c.getContext('2d')!;
-  for (let y = 0; y < doc.height; y += band) {
-    const h = Math.min(band, doc.height - y);
-    const px = flattenRegion(doc, { x: 0, y, w: doc.width, h }, { output: true });
+  for (let y = 0; y < page.height; y += band) {
+    const h = Math.min(band, page.height - y);
+    const px = await flattenRegionAsync(page, { x: 0, y, w: page.width, h }, { output: true }, saveTick);
     // JPEG has no transparency: the picture goes on white paper. PNG and WebP keep the alpha as it is.
-    cctx.putImageData(new ImageData(format === 'jpg' ? flattenOverWhite(px) : px, doc.width, h), 0, y);
+    cctx.putImageData(new ImageData(format === 'jpg' ? flattenOverWhite(px) : px, page.width, h), 0, y);
+    await saveTick();
   }
   const picture = await new Promise<Blob | null>((done) => c.toBlob(done, CANVAS_TYPES[format], 0.92));
   if (!picture) throw new Error('No se pudo crear la imagen.');
@@ -2270,9 +2280,13 @@ async function newDocumentFlow(folder: string | null = null): Promise<void> {
 const NEW_FILE_FORMATS: SaveFormat[] = ['lienzo', 'psd', 'psb', 'ora'];
 
 /** PNG through the browser's own codec, for the formats that carry one PNG per layer. */
+/** The turns the window is given while a file is encoded: no format may hold it still for long (see engine/cooperate.ts). */
+const saveTick = createTick();
+
 const pngCodecs: OraCodecs = {
+  tick: saveTick,
   // Not through a canvas: its toBlob waits for idle time, which a window that keeps drawing never has (see png-encode.ts).
-  encodePng: (width, height, rgba) => encodePng(width, height, rgba),
+  encodePng: (width, height, rgba) => encodePng(width, height, rgba, saveTick),
   async decodePng(bytes) {
     return drawable(await createImageBitmap(new Blob([bytes as BlobPart], { type: 'image/png' })));
   },
@@ -2286,36 +2300,37 @@ const pngCodecs: OraCodecs = {
 let justEncoded: { doc: Document; revision: number; blob: Blob } | null = null;
 
 async function encodeAs(kind: SaveKind, format: SaveFormat): Promise<{ blob: Blob; warnings: string[] }> {
+  // Encoding gives the window turns on the way, so the tab shown may change meanwhile: the page is the one being saved.
+  const page = doc;
   if (kind === 'image') {
     if (format === 'psd' || format === 'psb') {
-      const { value, warnings } = exportFlatPsd(doc, { large: format === 'psb' });
+      const { value, warnings } = await exportFlatPsd(page, { large: format === 'psb' }, saveTick);
       return { blob: new Blob([value], { type: 'image/vnd.adobe.photoshop' }), warnings };
     }
     if (isLayered(format)) throw new Error(`«.${formatInfo(format).ext}» guarda capas: no es una imagen plana.`);
-    return { blob: await renderFlat(format as ImageFormat), warnings: [] };
+    return { blob: await renderFlat(format as ImageFormat, page), warnings: [] };
   }
   switch (format) {
     case 'lienzo':
       // The page is taken now: the picture is made when the tiles are written, and another tab may be showing by then.
-      const page = doc;
       const revision = history.revision;
-      const blob = await saveLienzo(page, { preview: () => previewPng(page) });
+      const blob = await saveLienzo(page, { preview: () => previewPng(page, saveTick) });
       // The autosave copy that follows a save is this very file: kept for it, so the page is not encoded and compressed a second time
       // right after saving (on a tablet that doubled the time the window stood still).
       justEncoded = { doc: page, revision, blob };
       return { blob, warnings: [] };
     case 'clip': {
       // Edits a copy of the .clip the document was opened from (see clip-write.ts).
-      const { value, warnings } = await exportClip(doc, { ...pngCodecs, loadSql });
+      const { value, warnings } = await exportClip(page, { ...pngCodecs, loadSql });
       return { blob: new Blob([value as BlobPart], { type: 'application/octet-stream' }), warnings };
     }
     case 'psd':
     case 'psb': {
-      const { value, warnings } = exportPsd(doc, { large: format === 'psb' });
+      const { value, warnings } = await exportPsd(page, { large: format === 'psb' }, saveTick);
       return { blob: new Blob([value], { type: 'image/vnd.adobe.photoshop' }), warnings };
     }
     case 'ora': {
-      const { value, warnings } = await exportOra(doc, pngCodecs);
+      const { value, warnings } = await exportOra(page, pngCodecs);
       return { blob: new Blob([value as BlobPart], { type: 'image/openraster' }), warnings };
     }
     default:
@@ -4592,13 +4607,37 @@ mountLayoutResizers();
   /** For measuring on a device (scripts/device-tests): saves the open document as a file would, and says how long it took. */
   async timeSave(withPreview = true): Promise<{ ms: number; bytes: number }> {
     const t0 = performance.now();
-    const blob = await saveLienzo(doc, withPreview ? { preview: () => previewPng(doc) } : {});
+    const blob = await saveLienzo(doc, withPreview ? { preview: () => previewPng(doc, saveTick) } : {});
     return { ms: Math.round(performance.now() - t0), bytes: blob.size };
+  },
+  /**
+   * For measuring on a device: encodes the open page in a format (as a save does, nothing is written) and says how long it took and the
+   * longest the page stood still meanwhile (the biggest gap of a 16 ms heartbeat): what a person would feel as the window freezing.
+   */
+  async probeEncode(kind: SaveKind, format: SaveFormat): Promise<{ ms: number; bytes: number; worstFreezeMs: number; warnings: string[] }> {
+    let last = performance.now();
+    let worst = 0;
+    const beat = setInterval(() => {
+      const n = performance.now();
+      worst = Math.max(worst, n - last - 16);
+      last = n;
+    }, 16);
+    try {
+      const t0 = performance.now();
+      const { blob, warnings } = await encodeAs(kind, format);
+      const ms = Math.round(performance.now() - t0);
+      await new Promise((r) => setTimeout(r, 50));
+      return { ms, bytes: blob.size, worstFreezeMs: Math.round(worst), warnings };
+    } finally {
+      clearInterval(beat);
+    }
   },
   applyView,
   resizeSurfaces,
   layersUi,
   filtersUi,
+  /** The ids of every filter, for the device tests that go through all of them. */
+  filterIds: Object.keys(FILTERS),
   renderer,
   view,
   transformUi,

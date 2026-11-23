@@ -1,10 +1,11 @@
 import type { BlendMode } from './blend';
-import { flattenRegion } from './composite';
+import { flattenRegionAsync, paperPixels } from './composite';
+import { noTick, type Tick } from './cooperate';
 import { createDocument, newLayer, type Document } from './document';
 import type { RawImage } from './image-decode';
 import { layerTree, type TreeNode } from './layer-tree';
 import type { Rect } from './tiles';
-import { readZip, writeZip, type ZipEntry } from './zip';
+import { readZip, writeZipAsync, type ZipEntry } from './zip';
 
 /**
  * OpenRaster (`.ora`): the open layered-image format Krita, GIMP, MyPaint and others share. A ZIP holding `mimetype`,
@@ -12,6 +13,8 @@ import { readZip, writeZip, type ZipEntry } from './zip';
  * public specification (openraster.org). PNG coding is injected so the format logic works without a canvas.
  */
 export interface OraCodecs {
+  /** Turns given to the window while a big file is made (see cooperate.ts). */
+  tick?: Tick;
   encodePng(width: number, height: number, rgba: Uint8ClampedArray): Promise<Uint8Array>;
   decodePng(bytes: Uint8Array): Promise<RawImage>;
 }
@@ -64,6 +67,7 @@ const utf8 = new TextEncoder();
 const num = (n: number): string => String(Math.round(n * 1000) / 1000);
 
 export async function exportOra(doc: Document, codecs: OraCodecs): Promise<OraResult<Uint8Array>> {
+  const tick = codecs.tick ?? noTick;
   const warnings: string[] = [];
   const files: ZipEntry[] = [{ name: 'mimetype', data: utf8.encode('image/openraster') }];
   let counter = 0;
@@ -88,17 +92,12 @@ export async function exportOra(doc: Document, codecs: OraCodecs): Promise<OraRe
     if (l.kind === 'paper') {
       bounds = { x: 0, y: 0, w: doc.width, h: doc.height };
       const c = l.paperColor ?? [255, 255, 255];
-      data = new Uint8ClampedArray(doc.width * doc.height * 4);
-      for (let i = 0; i < data.length; i += 4) {
-        data[i] = c[0];
-        data[i + 1] = c[1];
-        data[i + 2] = c[2];
-        data[i + 3] = 255;
-      }
+      data = paperPixels(doc.width, doc.height, c);
     } else {
       bounds = l.surface.contentBounds();
-      if (bounds) data = l.surface.readRect(bounds);
+      if (bounds) data = await l.surface.readRectAsync(bounds, tick);
     }
+    await tick();
     // A layer without pixels still needs a PNG: a 1×1 transparent one.
     const w = bounds?.w ?? 1;
     const h = bounds?.h ?? 1;
@@ -120,11 +119,11 @@ export async function exportOra(doc: Document, codecs: OraCodecs): Promise<OraRe
 
   const full: Rect = { x: 0, y: 0, w: doc.width, h: doc.height };
   if (doc.width * doc.height <= 40_000_000) {
-    files.push({ name: 'mergedimage.png', data: await codecs.encodePng(doc.width, doc.height, flattenRegion(doc, full, { output: true })) });
+    files.push({ name: 'mergedimage.png', data: await codecs.encodePng(doc.width, doc.height, await flattenRegionAsync(doc, full, { output: true }, tick)) });
   } else {
     warnings.push('El documento es muy grande: el archivo no incluye la imagen compuesta (sí las capas).');
   }
-  return { value: writeZip(files), warnings };
+  return { value: await writeZipAsync(files, tick), warnings };
 }
 
 interface XmlNode {

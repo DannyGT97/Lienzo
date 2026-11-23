@@ -3,7 +3,8 @@
  * .ora, a plain picture) into a small PNG; `createThumbs` keeps them in IndexedDB (one per file, valid while the file's
  * date and size are the same) and makes them one at a time, so a folder of big pages never freezes the window.
  */
-import { thumbnail } from '../engine/composite';
+import { thumbnail, thumbnailAsync } from '../engine/composite';
+import { noTick, type Tick } from '../engine/cooperate';
 import { importClip, looksLikeClip, readClipPreview } from '../engine/clip-file';
 import { SNIFF_BYTES, sniffImage, type RawImage } from '../engine/image-decode';
 import { isLienzo, loadLienzo, readLienzoPreview } from '../engine/lienzo-file';
@@ -24,11 +25,11 @@ export interface Source {
 export const sourceOf = (blob: Blob): Source => ({ size: blob.size, range: async (a, b) => blob.slice(a, b), all: async () => blob });
 
 /** The small PNG kept inside a `.lienzo` file when it is saved (see `saveLienzo`). */
-export async function previewPng(doc: Document): Promise<Uint8Array | null> {
+export async function previewPng(doc: Document, tick: Tick = noTick): Promise<Uint8Array | null> {
   const { w, h } = fit(doc.width, doc.height);
   // Looking at every pixel of a big page is slow on a tablet and not needed for a picture this small: about 16 per cell is plenty.
   const sample = Math.max(1, Math.floor(Math.min(doc.width / w, doc.height / h) / 4));
-  const blob = await pngOf(w, h, thumbnail(doc, w, h, { output: true, sample }));
+  const blob = await pngOf(w, h, await thumbnailAsync(doc, w, h, { output: true, sample }, tick));
   return new Uint8Array(await blob.arrayBuffer());
 }
 

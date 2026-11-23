@@ -1,3 +1,4 @@
+import type { Tick } from './cooperate';
 /**
  * Working block size of the engine. The brush, the compositor, the GL renderer and the `.lienzo` file are all written
  * against it, so every surface a document creates uses it. `TiledSurface` itself does not depend on this number: its
@@ -253,6 +254,17 @@ export class TiledSurface {
   }
 
   /** Dense RGBA copy of a rectangle (transparent where there are no tiles or outside the surface). */
+  /** `readRect` in strips of rows, with a turn for the window between them: a whole page of one layer is a hundred megabytes to copy. */
+  async readRectAsync(r: Rect, tick: Tick, rows = 256): Promise<Uint8ClampedArray> {
+    const out = new Uint8ClampedArray(r.w * r.h * 4);
+    for (let y = 0; y < r.h; y += rows) {
+      const h = Math.min(rows, r.h - y);
+      out.set(this.readRect({ x: r.x, y: r.y + y, w: r.w, h }), y * r.w * 4);
+      await tick();
+    }
+    return out;
+  }
+
   readRect(r: Rect): Uint8ClampedArray {
     const out = new Uint8ClampedArray(r.w * r.h * 4);
     const s = this.blockSize;

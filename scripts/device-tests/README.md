@@ -21,6 +21,8 @@ npm run device -- desktop setup,zoom --layers 20
 | `zoom` / `pan` | Tiempo de GPU por fotograma y fotogramas largos con zoom rápido y paneo. |
 | `stress` | Acciones aleatorias (capas, deshacer, trazos, relleno, selecciones, vista…): sin errores, sin perder el contexto GL. `--steps`, `--seed`. |
 | `fillcost` | El bote en una página con muchas capas: un toque recién elegida la herramienta (en frío) y con la página ya preparada. Se usa después de `setup`. |
+| `saveformats` | Todos los formatos de guardado (documento e imagen) sobre una página de muchas capas con píxeles: tiempo y, sobre todo, el mayor rato que la ventana se queda parada (máx. 250 ms). No escribe nada. Se usa después de `setup`. |
+| `filtercost` | Todos los filtros sobre la capa más cargada del documento abierto (`--tab texto` elige pestaña): tiempo de la primera vista previa, mayor rato que la ventana se queda parada al arrastrar el control y al aplicar (máx. 250 ms), y tiempo de aplicar. Deshace cada aplicación. |
 | `strokecost` | Coste por muestra del lápiz según tamaño y dureza, y de los fotogramas mientras se pinta. |
 
 Los límites están en cada prueba (`check(...)`), distintos para tableta y escritorio. `--out informe.json` guarda todo.

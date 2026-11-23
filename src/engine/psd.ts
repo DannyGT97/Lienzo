@@ -1,6 +1,8 @@
-import { initializeCanvas, readPsd, writePsd, type BlendMode as PsdBlend, type Layer as PsdLayer, type Psd } from 'ag-psd';
+import { initializeCanvas, readPsd, type BlendMode as PsdBlend, type Layer as PsdLayer, type Psd } from 'ag-psd';
 import type { BlendMode } from './blend';
-import { flattenRegion } from './composite';
+import { flattenRegionAsync, paperPixels } from './composite';
+import { noTick, type Tick } from './cooperate';
+import { writePsdOffThread } from './psd-write';
 import { DECODE_PIXEL_LIMIT } from './image-decode';
 import { createDocument, newLayer, type Document, type Layer, type LayerMask } from './document';
 import { layerTree, type TreeNode } from './layer-tree';
@@ -105,7 +107,7 @@ function maskBounds(doc: Document, m: LayerMask): Rect | null {
 }
 
 /** `large` writes a PSB (version 2 of the format: 32-bit sizes become 64-bit, so pages beyond 30 000 px fit). */
-export function exportPsd(doc: Document, options: { large?: boolean } = {}): PsdResult<ArrayBuffer> {
+export async function exportPsd(doc: Document, options: { large?: boolean } = {}, tick: Tick = noTick): Promise<PsdResult<ArrayBuffer>> {
   const warnings: string[] = [];
   const full: Rect = { x: 0, y: 0, w: doc.width, h: doc.height };
   // PSD adjustment layers are a different thing from Lienzo's: they are left out (the flattened preview does include them).
@@ -115,7 +117,7 @@ export function exportPsd(doc: Document, options: { large?: boolean } = {}): Psd
       warnings.push(`"${n.layer.name}": la capa de ajuste no se exportó a PSD (solo se ve reflejada en la imagen compuesta).`);
       return false;
     });
-  const convert = (node: TreeNode): PsdLayer => {
+  const convert = async (node: TreeNode): Promise<PsdLayer> => {
     const l = node.layer;
     if (l.kind !== 'raster' && l.kind !== 'paper' && l.kind !== 'folder') {
       warnings.push(`"${l.name}": la capa de ${l.kind} se exportó rasterizada (ya no se podrá editar como objeto).`);
@@ -140,6 +142,7 @@ export function exportPsd(doc: Document, options: { large?: boolean } = {}): Psd
         // PSD keeps the mask in the red channel.
         const gray = new Uint8ClampedArray(b.w * b.h * 4);
         for (let y = 0; y < b.h; y++) {
+          if ((y & 63) === 63) await tick();
           for (let x = 0; x < b.w; x++) {
             const tile = l.mask.surface.get(Math.floor((b.x + x) / TILE), Math.floor((b.y + y) / TILE));
             const i = (y * b.w + x) * 4;
@@ -151,7 +154,7 @@ export function exportPsd(doc: Document, options: { large?: boolean } = {}): Psd
       }
     }
     if (l.kind === 'folder') {
-      layer.children = exportable(node.children).map(convert);
+      layer.children = await all(exportable(node.children));
       layer.opened = l.open;
       layer.blendMode = l.through ? 'pass through' : m.mode;
       return layer;
@@ -162,17 +165,12 @@ export function exportPsd(doc: Document, options: { large?: boolean } = {}): Psd
     if (l.kind === 'paper') {
       bounds = full;
       const c = l.paperColor ?? [255, 255, 255];
-      data = new Uint8ClampedArray(full.w * full.h * 4);
-      for (let i = 0; i < data.length; i += 4) {
-        data[i] = c[0];
-        data[i + 1] = c[1];
-        data[i + 2] = c[2];
-        data[i + 3] = 255;
-      }
+      data = paperPixels(full.w, full.h, c);
     } else {
       bounds = l.surface.contentBounds();
-      if (bounds) data = l.surface.readRect(bounds);
+      if (bounds) data = await l.surface.readRectAsync(bounds, tick);
     }
+    await tick();
     if (bounds && data) {
       layer.left = bounds.x;
       layer.top = bounds.y;
@@ -180,18 +178,21 @@ export function exportPsd(doc: Document, options: { large?: boolean } = {}): Psd
     }
     return layer;
   };
-  const children: PsdLayer[] = exportable(layerTree(doc.layers)).map(convert);
+  const all = async (nodes: TreeNode[]): Promise<PsdLayer[]> => {
+    const done: PsdLayer[] = [];
+    for (const n of nodes) done.push(await convert(n));
+    return done;
+  };
+  const children: PsdLayer[] = await all(exportable(layerTree(doc.layers)));
 
   const psd: Psd = { width: doc.width, height: doc.height, children };
   if (doc.width * doc.height <= COMPOSITE_LIMIT) {
     // The flattened preview is what other programs show, so it leaves out drafts and references like any output.
-    psd.imageData = { width: doc.width, height: doc.height, data: flattenRegion(doc, full, { output: true }) };
+    psd.imageData = { width: doc.width, height: doc.height, data: await flattenRegionAsync(doc, full, { output: true }, tick) };
   } else {
     warnings.push('El documento es muy grande: el PSD no incluye la imagen compuesta (sí las capas).');
   }
-  const out = writePsd(psd, { trimImageData: false, generateThumbnail: false, psb: options.large === true });
-  // writePsd returns an ArrayBuffer; copy so the result never aliases an internal buffer.
-  return { value: out.slice(0), warnings };
+  return { value: await writePsdOffThread(psd, { trimImageData: false, generateThumbnail: false, psb: options.large === true }), warnings };
 }
 
 /**
@@ -199,15 +200,14 @@ export function exportPsd(doc: Document, options: { large?: boolean } = {}): Psd
  * like in any output. Unlike `exportPsd` nothing of the layer structure goes in, and the file's own preview is that same
  * picture. Throws when the page is too big to be merged in one block of memory.
  */
-export function exportFlatPsd(doc: Document, options: { large?: boolean } = {}): PsdResult<ArrayBuffer> {
+export async function exportFlatPsd(doc: Document, options: { large?: boolean } = {}, tick: Tick = noTick): Promise<PsdResult<ArrayBuffer>> {
   if (doc.width * doc.height > COMPOSITE_LIMIT) {
     throw new Error(`El documento es demasiado grande para exportarlo como PSD de una capa (más de ${COMPOSITE_LIMIT / 1_000_000} megapíxeles).`);
   }
-  const data = flattenRegion(doc, { x: 0, y: 0, w: doc.width, h: doc.height }, { output: true });
+  const data = await flattenRegionAsync(doc, { x: 0, y: 0, w: doc.width, h: doc.height }, { output: true }, tick);
   const merged: PsdLayer = { name: 'Imagen combinada', left: 0, top: 0, imageData: { width: doc.width, height: doc.height, data } };
   const psd: Psd = { width: doc.width, height: doc.height, children: [merged], imageData: { width: doc.width, height: doc.height, data } };
-  const out = writePsd(psd, { trimImageData: false, generateThumbnail: false, psb: options.large === true });
-  return { value: out.slice(0), warnings: [] };
+  return { value: await writePsdOffThread(psd, { trimImageData: false, generateThumbnail: false, psb: options.large === true }), warnings: [] };
 }
 
 /**
